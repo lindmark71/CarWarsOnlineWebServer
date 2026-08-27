@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Casino Dice Roller - Zoom Forward</title>
+    <style>
+        /* Setup the casino table background */
+        body {
+            background-color: #0b6623;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        /* Container holding all active dice */
+        #dice-container {
+            display: flex;
+            gap: 40px;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            min-height: 250px;
+            padding: 20px;
+            width: 80%;
+        }
+
+        /* The 3D scene box for a single die */
+        .dice-scene {
+            width: 100px;
+            height: 100px;
+            perspective: 1000px; /* Applies depth specifically to this cube */
+            
+            /* INITIAL STATE: Microscopic (far away) but perfectly centered */
+            transform: scale(0.05);
+            opacity: 0;
+            
+            /* Smoothly scale up and fade in over 2.2 seconds */
+            transition: transform 2.2s cubic-bezier(0.25, 0.7, 0.3, 1), 
+                        opacity 0.5s ease-out;
+        }
+
+        /* Triggered by JS to animate the scaling and opacity */
+        .dice-scene.animate-in {
+            transform: scale(1);
+            opacity: 1;
+        }
+
+        /* The actual 3D Cube */
+        .cube {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            transform-style: preserve-3d;
+            
+            /* INITIAL STATE: Randomly tilted starting rotation */
+            transform: rotateX(45deg) rotateY(45deg);
+            
+            /* Tumble timing */
+            transition: transform 2.2s cubic-bezier(0.25, 0.7, 0.3, 1); 
+        }
+
+        /* Styling for every face of the die */
+        .cube__face {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background-color: rgba(220, 0, 0, 0.9); /* Translucent casino red */
+            border: 2px solid #b00000;
+            border-radius: 12px; /* Soft edges */
+            box-shadow: inset 0 0 15px rgba(0,0,0,0.3);
+            display: grid;
+            grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+            padding: 8px;
+            box-sizing: border-box;
+        }
+
+        /* The white pips (dots) */
+        .pip {
+            display: block;
+            background-color: #ffffff;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            margin: auto;
+            box-shadow: inset 1px 1px 3px rgba(0,0,0,0.4);
+        }
+
+        /* Position the 6 faces in 3D space */
+        .cube__face--1 { transform: rotateY(  0deg) translateZ(50px); }
+        .cube__face--6 { transform: rotateY(180deg) translateZ(50px); }
+        .cube__face--3 { transform: rotateY( 90deg) translateZ(50px); }
+        .cube__face--4 { transform: rotateY(-90deg) translateZ(50px); }
+        .cube__face--2 { transform: rotateX( 90deg) translateZ(50px); }
+        .cube__face--5 { transform: rotateX(-90deg) translateZ(50px); }
+
+        /* Grid placement templates for standard dice dot layouts */
+        .cube__face--1 .pip { grid-area: 2 / 2; }
+        
+        .cube__face--2 .pip:nth-child(1) { grid-area: 1 / 1; }
+        .cube__face--2 .pip:nth-child(2) { grid-area: 3 / 3; }
+        
+        .cube__face--3 .pip:nth-child(1) { grid-area: 1 / 1; }
+        .cube__face--3 .pip:nth-child(2) { grid-area: 2 / 2; }
+        .cube__face--3 .pip:nth-child(3) { grid-area: 3 / 3; }
+        
+        .cube__face--4 .pip:nth-child(1) { grid-area: 1 / 1; }
+        .cube__face--4 .pip:nth-child(2) { grid-area: 1 / 3; }
+        .cube__face--4 .pip:nth-child(3) { grid-area: 3 / 1; }
+        .cube__face--4 .pip:nth-child(4) { grid-area: 3 / 3; }
+        
+        .cube__face--5 .pip:nth-child(1) { grid-area: 1 / 1; }
+        .cube__face--5 .pip:nth-child(2) { grid-area: 1 / 3; }
+        .cube__face--5 .pip:nth-child(3) { grid-area: 2 / 2; }
+        .cube__face--5 .pip:nth-child(4) { grid-area: 3 / 1; }
+        .cube__face--5 .pip:nth-child(5) { grid-area: 3 / 3; }
+        
+        .cube__face--6 .pip:nth-child(1) { grid-area: 1 / 1; }
+        .cube__face--6 .pip:nth-child(2) { grid-area: 1 / 3; }
+        .cube__face--6 .pip:nth-child(3) { grid-area: 2 / 1; }
+        .cube__face--6 .pip:nth-child(4) { grid-area: 2 / 3; }
+        .cube__face--6 .pip:nth-child(5) { grid-area: 3 / 1; }
+        .cube__face--6 .pip:nth-child(6) { grid-area: 3 / 3; }
+
+        /* Simple button styling for testing */
+        #roll-btn {
+            margin-top: 30px;
+            padding: 12px 24px;
+            font-size: 18px;
+            background-color: #ffcc00;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        }
+        #roll-btn:hover { background-color: #e6b800; }
+    </style>
+</head>
+<body>
+
+    <!-- Container where Javascript dynamically injects the dice -->
+    <div id="dice-container"></div>
+
+    <!-- UI Button purely for manual testing -->
+    <button id="roll-btn" onclick="demoRoll()">Test Roll:</button>
+
+    <script>
+        // Exact XYZ rotation values to display each specific face up
+        const targetRotations = {
+            1: { x: 0,    y: 0 },
+            6: { x: 0,    y: 180 },
+            3: { x: 0,    y: -90 },
+            4: { x: 0,    y: 90 },
+            2: { x: -90,  y: 0 },
+            5: { x: 90,   y: 0 }
+        };
+
+        /**
+         * Core Function: Erases old dice, builds the exact count needed, 
+         * scales them up from the center, and tumbles them to land cleanly.
+         * @param {Array<number>} targetValues - Array of numbers
+         */
+        function rollDice(targetValues) {
+            const container = document.getElementById('dice-container');
+            container.innerHTML = ''; // Wipe previous dice
+
+            targetValues.forEach((value) => {
+                if (value < 1 || value > 6) return;
+
+                const scene = document.createElement('div');
+                scene.className = 'dice-scene';
+
+                const cube = document.createElement('div');
+                cube.className = 'cube';
+                cube.innerHTML = `
+                    <div class="cube__face cube__face--1"><span class="pip"></span></div>
+                    <div class="cube__face cube__face--6"><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div>
+                    <div class="cube__face cube__face--3"><span class="pip"></span><span class="pip"></span><span class="pip"></span></div>
+                    <div class="cube__face cube__face--4"><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div>
+                    <div class="cube__face cube__face--2"><span class="pip"></span><span class="pip"></span></div>
+                    <div class="cube__face cube__face--5"><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span><span class="pip"></span></div>
+                `;
+
+                scene.appendChild(cube);
+                container.appendChild(scene);
+
+                // Add random "extra spins" so the rolling looks chaotic
+                const extraSpinsX = (Math.floor(Math.random() * 3) + 3) * 360; 
+                const extraSpinsY = (Math.floor(Math.random() * 3) + 3) * 360; 
+
+                // Calculate exact final angles
+                const finalX = targetRotations[value].x + extraSpinsX;
+                const finalY = targetRotations[value].y + extraSpinsY;
+
+                // Force a micro-delay so the browser registers the initial 0.05 scale state
+                setTimeout(() => {
+                    // 1. Expand the parent container (grows from tiny to 100% size)
+                    scene.classList.add('animate-in');
+                    
+                    // 2. Rotate the inner cube 3D geometry to match target face
+                    cube.style.transform = `rotateX(${finalX}deg) rotateY(${finalY}deg)`;
+                }, 50);
+            });
+        }
+
+        // Helper function for the HTML test button
+        function demoRoll() {
+            rollDice([2, 5]);
+        }
+    </script>
+</body>
+</html>

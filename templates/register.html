@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Create Account</title>
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f4f4f9; }
+        .register-container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); width: 340px; }
+        h2 { margin-bottom: 20px; text-align: center; color: #333; }
+        input[type="text"], input[type="email"], input[type="password"], input[type="tel"] {
+            width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc;
+            border-radius: 4px; box-sizing: border-box; font-size: 14px;
+        }
+        button { width: 100%; padding: 10px; background-color: #007BFF; border: none; color: white; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; }
+        button:hover { background-color: #0056b3; }
+        .error   { color: red;   font-size: 13px; text-align: center; margin-top: 8px; }
+        .success { color: green; font-size: 13px; text-align: center; margin-top: 8px; }
+        .optional-label { font-size: 12px; color: #888; margin-left: 4px; }
+        .field-hint { font-size: 11px; color: #aaa; margin: -6px 0 6px 2px; }
+        .login-link { text-align: center; margin-top: 15px; font-size: 14px; }
+        .login-link a { color: #007BFF; text-decoration: none; }
+        .login-link a:hover { text-decoration: underline; }
+        .section-divider {
+            border: none;
+            border-top: 1px solid #eee;
+            margin: 14px 0 6px 0;
+        }
+        .section-label {
+            font-size: 12px;
+            font-weight: bold;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 2px;
+        }
+
+        /* ── Password Visibility Toggle ───────────────────────────────── */
+        .password-wrapper {
+            position: relative;
+        }
+
+        .password-wrapper input[type="password"],
+        .password-wrapper input[type="text"] {
+            padding-right: 40px;
+        }
+
+        .toggle-password {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            font-size: 16px;
+            color: #888;
+            user-select: none;
+            background: none;
+            border: none;
+            padding: 0;
+            margin: 0;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .toggle-password:hover { color: #333; }
+    </style>
+</head>
+<body>
+    <div class="register-container">
+        <h2>Create Account</h2>
+
+        {% if error %}
+            <p class="error">{{ error }}</p>
+        {% endif %}
+
+        {% if success %}
+            <p class="success">{{ success }}</p>
+            <div class="login-link"><a href="/login">Click here to log in</a></div>
+        {% else %}
+            <form method="POST" action="/register">
+
+                <!-- ── Required Fields ─────────────────────────── -->
+                <div class="section-label">Account Details</div>
+
+                <input type="text"  name="username" placeholder="Username" required>
+                <input type="email" name="email"    placeholder="Email Address" required>
+
+                <div class="password-wrapper">
+                    <input type="password" name="password" id="regPassword" placeholder="Password (min 8 characters)" required>
+                    <button type="button" class="toggle-password" onclick="togglePassword('regPassword', this)">👁</button>
+                </div>
+
+                <div class="password-wrapper">
+                    <input type="password" name="confirm_password" id="regConfirmPassword" placeholder="Confirm Password" required>
+                    <button type="button" class="toggle-password" onclick="togglePassword('regConfirmPassword', this)">👁</button>
+                </div>
+
+                <!-- ── Optional SMS Fields ────────────────────── -->
+                <hr class="section-divider">
+                <div class="section-label">
+                    SMS Notifications
+                    <span class="optional-label">(optional)</span>
+                </div>
+
+                <input type="tel" name="phone"
+                    placeholder="Phone e.g. +12155551234">
+                <div class="field-hint">
+                    Include country code. Used for reminders and password recovery.<br>
+                    Leave blank to skip SMS notifications.
+                </div>
+
+                <button type="submit">Create Account</button>
+            </form>
+
+            <div class="login-link">
+                <p>Already have an account? <a href="/login">Log in</a></p>
+            </div>
+        {% endif %}
+    </div>
+
+<script>
+    function togglePassword(fieldId, button) {
+        const field = document.getElementById(fieldId);
+        if (field.type === 'password') {
+            field.type = 'text';
+            button.textContent = '🙈';
+        } else {
+            field.type = 'password';
+            button.textContent = '👁';
+        }
+    }
+</script>
+
+</body>
+</html>
