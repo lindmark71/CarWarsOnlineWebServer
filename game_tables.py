@@ -320,17 +320,34 @@ def get_current_mover(queue: dict) -> dict | None:
 
 # game_tables.py (Updated Function Append)
 
-def process_end_of_turn_hc_recovery(vehicle_state: dict) -> int:
+def process_end_of_turn_hc_recovery(car_record: dict) -> None:
     """
-    Applies the official recovery rule: adds points equal to Max HC 
-    to the current status, rather than auto-snapping to full capacity.
+    Executes official Car Wars End of Turn (EOT) Handling Class recovery math.
+    Increases the current HC by max_hc (or by 1 if max_hc < 1), 
+    capping the final value at max_hc.
     """
-    max_hc = int(float(vehicle_state.get('hc', 3.0)))
-    current_hs = int(vehicle_state.get('temporary_handling_status', max_hc))
-    
-    # Recover fixed max capacity points volume
-    updated_hs = current_hs + max_hc
-    final_hs = min(max_hc, updated_hs)
-    
-    vehicle_state['temporary_handling_status'] = final_hs
-    return final_hs
+    if not car_record:
+        return
+
+    try:
+        # 1. Safely extract and parse current metrics (handling string/numeric mix)
+        current_hc = float(car_record.get('hc', 0.0))
+        max_hc = float(car_record.get('max_hc', 1.0))
+        
+        # 2. Determine recovery step: Add max_hc, but if max_hc is under 1, add 1 instead
+        recovery_amount = max_hc if max_hc >= 1.0 else 1.0
+        
+        # 3. Calculate new score and apply hard ceiling cap at max_hc
+        new_hc = current_hc + recovery_amount
+        if new_hc > max_hc:
+            new_hc = max_hc
+            
+        # 4. Save clean formatted string/int back to matching chassis record slots
+        # If max_hc is a whole number (like 3.0), we can format it clean or store as float
+        car_record['hc'] = str(int(new_hc)) if new_hc.is_integer() else str(round(new_hc, 1))
+        
+        print(f"[EOT RECOVERY] Restored vehicle HC from {current_hc} -> {car_record['hc']} (Max: {max_hc})")
+        
+    except Exception as e:
+        print(f"[EOT RECOVERY ERROR] Failed to compute handling recovery math: {e}")
+

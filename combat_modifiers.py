@@ -64,12 +64,6 @@ class CombatModifiersEngine:
         total += int(attacker.get('gunner_skill_level', 0))
         total += cls.calculate_range_modifier(distance)
         
-        # Computers
-        comp = attacker.get('computer_type', 'None')
-        if comp == 'Standard': total += 1
-        elif comp == 'Hi-Res': total += 2
-        elif comp == 'Cyberlink': total += 3
-        
         # Chassis Target Size Profiles
         v_size = defender.get('vehicle_size_class', 'Car')
         if v_size in ['Compact', 'Subcompact']: total -= 1

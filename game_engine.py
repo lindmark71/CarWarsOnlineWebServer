@@ -8,9 +8,133 @@ from num2words import num2words
 
 
 GAME_FOLDER = './games'
+TC_BONUS_BY_TYPE = {
+    "Targeting Computer": 1,
+    "Hi-Res Computer": 2,
+    "Single-Weapon Computer": 1,
+    "Hi-Res SWC (HRSWC)": 2,
+    "Cyberlink": 3,
+}
+POSITION_WIDE_TC_TYPES = {"Targeting Computer", "Hi-Res Computer"}
+SINGLE_WEAPON_TC_TYPES = {"Single-Weapon Computer", "Hi-Res SWC (HRSWC)", "Cyberlink"}
 
 class GameEngine:
 
+    @staticmethod
+    def _translate_row_id_to_position_id(row_id_based_id: str) -> str:
+        """
+        Converts a weapon reference saved using the Designer's row_id
+        scheme ("weapon-{row_id}-{unit}", row_id 1-based) into the
+        0-based array-position scheme get_weapon_facing_and_name /
+        get_available_firing_actions actually use
+        ("weapon-{idx}-{unit}"). See the patch header for the full
+        explanation and the assumption this relies on.
+        """
+        parts = row_id_based_id.split("-")
+        if len(parts) != 3 or parts[0] != "weapon":
+            return row_id_based_id  # not a weapon reference -- leave untouched
+        row_id = GameEngine.to_int(parts[1], default=-1)
+        if row_id is None or row_id < 1:
+            return row_id_based_id
+        return f"weapon-{row_id - 1}-{parts[2]}"
+
+    @staticmethod
+    def _resolve_tc_crew_id(tc_crew_label: str):
+        """
+        Parses a Targeting Computer's stored 'Crew #<row_id>: <Title>'
+        assignment label back into the crew_id scheme (crew_0, crew_1,
+        ...) used elsewhere on the server.
+ 
+        ASSUMPTION (flagged): the Designer's crew_row_id is assumed to
+        equal (array position + 1) in the saved self.crew_title_{i}
+        sequence -- same class of fragility as the weapon row_id issue
+        above, and for the same underlying reason (the save format
+        doesn't preserve historical row_ids, only current values).
+        """
+        if not tc_crew_label:
+            return None
+        match = re.match(r"Crew #(\d+):", tc_crew_label.strip())
+        if not match:
+            return None
+        row_id = int(match.group(1))
+        return f"crew_{row_id - 1}"
+ 
+    @staticmethod
+    def _resolve_tc_weapon_id(car_record: dict, tc_weapon_label: str):
+        """
+        Parses a Targeting Computer's stored weapon/link assignment
+        (saved as display label text) back into a weapon_id/link_id by
+        matching against the car's CURRENT set of available firing
+        actions. Returns None if unassigned or if the label no longer
+        matches anything (e.g. the assigned weapon was since deleted).
+        """
+        if not tc_weapon_label or tc_weapon_label == "(none)":
+            return None
+        all_actions = GameEngine.get_available_firing_actions(car_record) + GameEngine.get_link_actions(car_record)
+        match = next((a for a in all_actions if a["label"] == tc_weapon_label), None)
+        return match["id"] if match else None
+ 
+    @staticmethod
+    def get_targeting_computer_bonus(car_record: dict, crew_id: str, weapon_id: str) -> int:
+        """
+        Total to-hit bonus from every installed Targeting-Computer-family
+        device that applies to this specific (crew_id, weapon_id) firing
+        action.
+ 
+        Rules (confirmed):
+          - Targeting Computer / Hi-Res Computer: scoped to ONE crew
+            position, applies to EVERY weapon/link that position fires --
+            including smart links. Weapon assignment is not checked for
+            these two types.
+          - Single-Weapon Computer / Hi-Res SWC / Cyberlink: scoped to ONE
+            crew position AND ONE specific weapon system. Does NOT
+            function if that weapon system is a smart link.
+ 
+        If multiple installed devices match, the HIGHEST single bonus
+        applies (not summed) -- consistent with the equipment-tier
+        convention used elsewhere in this project.
+        """
+        best_bonus = 0
+        tc_index = 0
+        while f"self.tc_type_{tc_index}" in car_record:
+            tc_type = car_record.get(f"self.tc_type_{tc_index}", "")
+            tc_crew_label = car_record.get(f"self.tc_crew_{tc_index}", "")
+            tc_weapon_label = car_record.get(f"self.tc_weapon_{tc_index}", "")
+ 
+            assigned_crew_id = GameEngine._resolve_tc_crew_id(tc_crew_label)
+            if assigned_crew_id != crew_id:
+                tc_index += 1
+                continue
+ 
+            bonus = TC_BONUS_BY_TYPE.get(tc_type, 0)
+            if bonus == 0:
+                tc_index += 1
+                continue
+ 
+            if tc_type in POSITION_WIDE_TC_TYPES:
+                best_bonus = max(best_bonus, bonus)
+ 
+            elif tc_type in SINGLE_WEAPON_TC_TYPES:
+                assigned_weapon_id = GameEngine._resolve_tc_weapon_id(car_record, tc_weapon_label)
+                if assigned_weapon_id is None or assigned_weapon_id != weapon_id:
+                    tc_index += 1
+                    continue
+ 
+                if assigned_weapon_id.startswith("link-"):
+                    link = next(
+                        (l for l in GameEngine.get_link_actions(car_record) if l["id"] == assigned_weapon_id),
+                        None
+                    )
+                    if link and GameEngine.link_is_smart_link(car_record, link["members"]):
+                        tc_index += 1
+                        continue
+ 
+                best_bonus = max(best_bonus, bonus)
+ 
+            tc_index += 1
+ 
+        return best_bonus    
+    
     @staticmethod
     def to_int(val, default: int = 0) -> int:
         try:
@@ -65,11 +189,25 @@ class GameEngine:
                     member_labels = [lbl for lbl in member_labels if lbl]
     
                 if member_labels:
+                    # PATCH: category for a link is derived from its first
+                    # member -- links join weapons that are meant to be
+                    # identical (or at least the same general type), so this
+                    # is reliable in practice even though it doesn't
+                    # explicitly check every member.
+                    first_category = ""
+                    if member_ids:
+                        first_parts = member_ids[0].split("-")
+                        if len(first_parts) == 3 and first_parts[0] == "weapon":
+                            first_idx = GameEngine.to_int(first_parts[1], default=-1)
+                            if first_idx >= 0:
+                                first_category = car_record.get(f"self.selected_weapon_alt_{first_idx}", "")
+ 
                     links.append({
                         "id": f"link-{idx}",
                         "label": "Linked: " + " + ".join(member_labels),
                         "type": "link",
-                        "members": member_ids
+                        "members": member_ids,
+                        "category": first_category
                     })
             idx += 1
         return links  
@@ -250,179 +388,174 @@ class GameEngine:
         except Exception as e:
             return False, f"Engine confirmation failure: {str(e)}"
         
-        @staticmethod
-        def process_player_movement2(game_id: str, username: str, maneuver: str) -> tuple[bool, str]:
-            """
-            Generates a multi-step phase projection path. Checks the vehicle's speed 
-            to determine the required car lengths, chains calculations together sequentially, 
-            and enforces rule restrictions safely with explicit data typing constraints.
-            """
-            # 1. IDENTIFY AND LOAD THE ACTIVE PHASE FILE
-            all_files = os.listdir(GAME_FOLDER)
-            game_files = sorted([f for f in all_files if f.startswith(game_id) and f.endswith('.txt')])
+    @staticmethod
+    def process_player_movement2(game_id: str, username: str, maneuver: str) -> tuple[bool, str]:
+        """
+        Generates a multi-step phase projection path. Checks the vehicle's speed 
+        to determine the required car lengths, chains calculations together sequentially, 
+        and enforces rule restrictions safely with explicit data typing constraints.
+        """
+        # 1. IDENTIFY AND LOAD THE ACTIVE PHASE FILE
+        all_files = os.listdir(GAME_FOLDER)
+        game_files = sorted([f for f in all_files if f.startswith(game_id) and f.endswith('.txt')])
             
-            if not game_files:
-                return False, "Could not identify active game state tracking file"
+        if not game_files:
+            return False, "Could not identify active game state tracking file"
                 
-            filepath = os.path.join(GAME_FOLDER, game_files[-1])
-            file_data = GameEngine.read_game_file(filepath)
+        filepath = os.path.join(GAME_FOLDER, game_files[-1])
+        file_data = GameEngine.read_game_file(filepath)
             
-            if not file_data:
-                return False, "Active game state file is empty or corrupted"
+        if not file_data:
+            return False, "Active game state file is empty or corrupted"
                 
-            # 2. LOCATE TARGET ACTIVE VEHICLE AND MOVEMENT QUEUE METADATA
-            base_car = next(
-                (record for record in file_data
-                 if str(record.get('CarPosition', '')).replace(' ', '') == 'CarPosition' and record.get('owner') == username),
-                None
-            )
+        # 2. LOCATE TARGET ACTIVE VEHICLE AND MOVEMENT QUEUE METADATA
+        base_car = next(
+            (record for record in file_data
+            if str(record.get('CarPosition', '')).replace(' ', '') == 'CarPosition' and record.get('owner') == username),
+            None
+        )
             
-            if not base_car:
-                return False, f"No active CarPosition record found for player: {username}"
+        if not base_car:
+            return False, f"No active CarPosition record found for player: {username}"
                 
-            movement_queue = next(
-                (record for record in file_data if str(record.get('MovementQueue', '')).replace(' ', '') == 'MovementQueue'), 
-                {}
-            )
-            current_phase = int(movement_queue.get('phase', 1))
-            current_speed = int(base_car.get('current_speed', 0))
+        movement_queue = next(
+            (record for record in file_data if str(record.get('MovementQueue', '')).replace(' ', '') == 'MovementQueue'), 
+            {}
+        )
+        current_phase = int(movement_queue.get('phase', 1))
+        current_speed = int(base_car.get('current_speed', 0))
             
-            # 3. EVALUATE TOTAL REQUIRED LENGTHS SECURELY
-            from game_tables import get_phase_movement
+        # 3. EVALUATE TOTAL REQUIRED LENGTHS SECURELY
+        from game_tables import get_phase_movement
+        try:
+            total_lengths = int(get_phase_movement(current_speed, current_phase))
+        except Exception:
+            total_lengths = 0
+                
+        maneuver = maneuver.upper().strip()
+            
+        # 4. INITIALIZE THE PLAN ARRAY EXPLICITLY
+        maneuver_plan = []
+        if maneuver == 'STR' or maneuver == '':
+            maneuver_plan = ['STR'] * total_lengths
+        else:
+            maneuver_plan.append(maneuver)
+            if total_lengths > 1:
+                maneuver_plan.extend(['STR'] * (total_lengths - 1))
+                    
+        # 5. RUN CHRONOLOGICAL SEGMENT LOOP RUNS
+        current_x = float(base_car.get('local_starting_x_qty', 0.0))
+        current_y = float(base_car.get('local_starting_y_qty', 0.0))
+        current_angle = float(base_car.get('orientation', 0.0))
+            
+        player_num_clean = int(float(base_car.get('player_number', 1)))
+        car_color_clean = str(base_car.get('color', 'blue'))
+        car_image_name = str(base_car.get('car_image_name', 'blue_car'))
+            
+        CAR_LENGTH = 1.0
+        CAR_WIDTH = 0.5
+        projected_ghosts = []
+            
+        for idx, step_maneuver in enumerate(maneuver_plan):
             try:
-                total_lengths = int(get_phase_movement(current_speed, current_phase))
-            except Exception:
-                total_lengths = 0
-                
-            if total_lengths < 2 and current_speed == 60 and current_phase == 1:
-                total_lengths = 2
-            if total_lengths < 1:
-                total_lengths = 1
-                
-            maneuver = maneuver.upper().strip()
-            
-            # 4. INITIALIZE THE PLAN ARRAY EXPLICITLY
-            maneuver_plan = []
-            if maneuver == 'STR' or maneuver == '':
-                maneuver_plan = ['STR'] * total_lengths
-            else:
-                maneuver_plan.append(maneuver)
-                if total_lengths > 1:
-                    maneuver_plan.extend(['STR'] * (total_lengths - 1))
-                    
-            # 5. RUN CHRONOLOGICAL SEGMENT LOOP RUNS
-            current_x = float(base_car.get('local_starting_x_qty', 0.0))
-            current_y = float(base_car.get('local_starting_y_qty', 0.0))
-            current_angle = float(base_car.get('orientation', 0.0))
-            
-            player_num_clean = int(float(base_car.get('player_number', 1)))
-            car_color_clean = str(base_car.get('color', 'blue'))
-            car_image_name = str(base_car.get('car_image_name', 'blue_car'))
-            
-            CAR_LENGTH = 1.0
-            CAR_WIDTH = 0.5
-            projected_ghosts = []
-            
-            for idx, step_maneuver in enumerate(maneuver_plan):
-                try:
-                    # --- CASE A: SEGMENT TRAJECTORY IS STRAIGHT ---
-                    if step_maneuver == 'STR':
-                        rad_current = math.radians(current_angle)
-                        final_x = current_x + (math.sin(rad_current) * CAR_LENGTH)
-                        final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH)
-                        final_angle = current_angle
+                # --- CASE A: SEGMENT TRAJECTORY IS STRAIGHT ---
+                if step_maneuver == 'STR':
+                    rad_current = math.radians(current_angle)
+                    final_x = current_x + (math.sin(rad_current) * CAR_LENGTH)
+                    final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH)
+                    final_angle = current_angle
                         
-                    # --- CASE B: SEGMENT TRAJECTORY IS A COMPOUND MIDPOINT BEND ---
-                    elif step_maneuver.startswith('D') and len(step_maneuver) >= 3 and step_maneuver[-1] in ['L', 'R']:
-                        severity = int(step_maneuver[1:-1])
-                        direction = step_maneuver[-1]
-                        delta_degrees = severity * 15
+                # --- CASE B: SEGMENT TRAJECTORY IS A COMPOUND MIDPOINT BEND ---
+                elif step_maneuver.startswith('D') and len(step_maneuver) >= 3 and step_maneuver[-1] in ['L', 'R']:
+                    severity = int(step_maneuver[1:-1])
+                    direction = step_maneuver[-1]
+                    delta_degrees = severity * 15
                         
-                        rad_start = math.radians(current_angle)
-                        mid_x = current_x + (math.sin(rad_start) * (CAR_LENGTH / 2.0))
-                        mid_y = current_y + (-math.cos(rad_start) * (CAR_LENGTH / 2.0))
-                        r_x = math.cos(rad_start)
-                        r_y = math.sin(rad_start)
+                    rad_start = math.radians(current_angle)
+                    mid_x = current_x + (math.sin(rad_start) * (CAR_LENGTH / 2.0))
+                    mid_y = current_y + (-math.cos(rad_start) * (CAR_LENGTH / 2.0))
+                    r_x = math.cos(rad_start)
+                    r_y = math.sin(rad_start)
                         
-                        if direction == 'L':
-                            pivot_x = mid_x - (r_x * (CAR_WIDTH / 2.0))
-                            pivot_y = mid_y - (r_y * (CAR_WIDTH / 2.0))
-                            rotation_angle = -delta_degrees
-                            final_angle = (current_angle - delta_degrees) % 360
-                        else:
-                            pivot_x = mid_x + (r_x * (CAR_WIDTH / 2.0))
-                            pivot_y = mid_y + (r_y * (CAR_WIDTH / 2.0))
-                            rotation_angle = delta_degrees
-                            final_angle = (current_angle + delta_degrees) % 360
+                    if direction == 'L':
+                        pivot_x = mid_x - (r_x * (CAR_WIDTH / 2.0))
+                        pivot_y = mid_y - (r_y * (CAR_WIDTH / 2.0))
+                        rotation_angle = -delta_degrees
+                        final_angle = (current_angle - delta_degrees) % 360
+                    else:
+                        pivot_x = mid_x + (r_x * (CAR_WIDTH / 2.0))
+                        pivot_y = mid_y + (r_y * (CAR_WIDTH / 2.0))
+                        rotation_angle = delta_degrees
+                        final_angle = (current_angle + delta_degrees) % 360
                             
-                        # FIX: Safely bind rad_rotation so it can be verified cleanly down the script frame
-                        rad_rotation = math.radians(rotation_angle)
-                        dx = mid_x - pivot_x
-                        dy = mid_y - pivot_y
-                        rotated_mid_x = pivot_x + (dx * math.cos(rad_rotation) - dy * math.sin(rad_rotation))
-                        rotated_mid_y = pivot_y + (dx * math.sin(rad_rotation) + dy * math.cos(rad_rotation))
+                    # FIX: Safely bind rad_rotation so it can be verified cleanly down the script frame
+                    rad_rotation = math.radians(rotation_angle)
+                    dx = mid_x - pivot_x
+                    dy = mid_y - pivot_y
+                    rotated_mid_x = pivot_x + (dx * math.cos(rad_rotation) - dy * math.sin(rad_rotation))
+                    rotated_mid_y = pivot_y + (dx * math.sin(rad_rotation) + dy * math.cos(rad_rotation))
                         
-                        rad_final = math.radians(final_angle)
-                        final_x = rotated_mid_x + (math.sin(rad_final) * (CAR_LENGTH / 2.0))
-                        final_y = rotated_mid_y + (-math.cos(rad_final) * (CAR_LENGTH / 2.0))
-                    else:
-                        continue
+                    rad_final = math.radians(final_angle)
+                    final_x = rotated_mid_x + (math.sin(rad_final) * (CAR_LENGTH / 2.0))
+                    final_y = rotated_mid_y + (-math.cos(rad_final) * (CAR_LENGTH / 2.0))
+                else:
+                    continue
                         
-                    final_heading_int = int(round(final_angle)) % 360
+                final_heading_int = int(round(final_angle)) % 360
                     
-                    # Deduct lengths sequentially per individual array block slice
-                    step_cost = 0.5 if step_maneuver == 'half' else 1.0
-                    total_remaining = float(base_car.get('remaining', 2.0))
-                    full_remaining = int(base_car.get('full_remaining', 2))
-                    half_remaining = float(base_car.get('half_remaining', 0.0))
+                # Deduct lengths sequentially per individual array block slice
+                step_cost = 0.5 if step_maneuver == 'half' else 1.0
+                total_remaining = float(base_car.get('remaining', 2.0))
+                full_remaining = int(base_car.get('full_remaining', 2))
+                half_remaining = float(base_car.get('half_remaining', 0.0))
                     
-                    if step_maneuver == 'half':
-                        calc_rem = round(max(0.0, total_remaining - (idx * 0.5)), 1)
-                        calc_full = full_remaining
-                        calc_half = 0.0
-                    else:
-                        calc_rem = round(max(0.0, total_remaining - (idx * 1.0) - step_cost), 1)
-                        calc_full = max(0, full_remaining - idx - 1)
-                        calc_half = half_remaining
+                if step_maneuver == 'half':
+                    calc_rem = round(max(0.0, total_remaining - (idx * 0.5)), 1)
+                    calc_full = full_remaining
+                    calc_half = 0.0
+                else:
+                    calc_rem = round(max(0.0, total_remaining - (idx * 1.0) - step_cost), 1)
+                    calc_full = max(0, full_remaining - idx - 1)
+                    calc_half = half_remaining
                     
-                    ghost_node = {
-                        'ProposedCarPosition': 'ProposedCarPosition',
-                        'player_number': player_num_clean,
-                        'owner': username,
-                        'local_starting_x_qty': round(final_x, 2),
-                        'local_starting_y_qty': round(final_y, 2),
-                        'heading': final_heading_int,
-                        'orientation': float(final_heading_int),
-                        'color': car_color_clean,
-                        'car_image_name': car_image_name,
-                        'maneuver_preview_type': step_maneuver,
-                        'segment_index': int(idx + 1),
-                        'total_segments': int(total_lengths),
-                        'remaining': calc_rem,
-                        'full_remaining': calc_full,
-                        'half_remaining': calc_half,
-                        'maneuvered': True if step_maneuver != 'STR' else bool(base_car.get('maneuvered', False)),
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    projected_ghosts.append(ghost_node)
+                ghost_node = {
+                    'ProposedCarPosition': 'ProposedCarPosition',
+                    'player_number': player_num_clean,
+                    'owner': username,
+                    'local_starting_x_qty': round(final_x, 2),
+                    'local_starting_y_qty': round(final_y, 2),
+                    'heading': final_heading_int,
+                    'orientation': float(final_heading_int),
+                    'color': car_color_clean,
+                    'car_image_name': car_image_name,
+                    'maneuver_preview_type': step_maneuver,
+                    'segment_index': int(idx + 1),
+                    'total_segments': int(total_lengths),
+                    'remaining': calc_rem,
+                    'full_remaining': calc_full,
+                    'half_remaining': calc_half,
+                    'maneuvered': True if step_maneuver != 'STR' else bool(base_car.get('maneuvered', False)),
+                    'timestamp': datetime.now().isoformat()
+                }
+                projected_ghosts.append(ghost_node)
                     
-                    # Update tracking constraints for chained calculations
-                    current_x = final_x
-                    current_y = final_y
-                    current_angle = final_angle
+                # Update tracking constraints for chained calculations
+                current_x = final_x
+                current_y = final_y
+                current_angle = final_angle
                     
-                except Exception as loop_err:
-                    return False, f"Internal engine calculation crash during route handling: {str(loop_err)}"
+            except Exception as loop_err:
+                return False, f"Internal engine calculation crash during route handling: {str(loop_err)}"
                     
-            # COMMIT PROJECTIONS BACK DOWN TO DISK
-            cleaned_file_data = [
-                record for record in file_data 
-                if not (str(record.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and record.get('owner') == username)
-            ]
-            cleaned_file_data.extend(projected_ghosts)
-            GameEngine.write_game_file(filepath, cleaned_file_data)
+        # COMMIT PROJECTIONS BACK DOWN TO DISK
+        cleaned_file_data = [
+            record for record in file_data 
+            if not (str(record.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and record.get('owner') == username)
+        ]
+        cleaned_file_data.extend(projected_ghosts)
+        GameEngine.write_game_file(filepath, cleaned_file_data)
             
-            return True, f"Generated path projection matrix chain containing {total_lengths} steps."
+        return True, f"Generated path projection matrix chain containing {total_lengths} steps."
     
     @staticmethod
     def process_player_movement(game_id: str, username: str, maneuver: str) -> tuple[bool, str]:
@@ -475,11 +608,6 @@ class GameEngine:
         except Exception:
             total_lengths = 0
     
-        if total_lengths < 2 and current_speed == 60 and current_phase == 1:
-            total_lengths = 2
-        if total_lengths < 1:
-            total_lengths = 1
-    
         maneuver = maneuver.upper().strip()
     
         # 4. INITIALIZE THE PLAN ARRAY EXPLICITLY
@@ -511,6 +639,11 @@ class GameEngine:
                     rad_current = math.radians(current_angle)
                     final_x = current_x + (math.sin(rad_current) * CAR_LENGTH)
                     final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH)
+                    final_angle = current_angle
+                elif step_maneuver == 'HALF':
+                    rad_current = math.radians(current_angle)
+                    final_x = current_x + (math.sin(rad_current) * CAR_LENGTH / 2)
+                    final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH / 2)
                     final_angle = current_angle
     
                 # --- CASE B: SEGMENT TRAJECTORY IS A COMPOUND MIDPOINT BEND ---
@@ -582,7 +715,7 @@ class GameEngine:
                     'remaining': calc_rem,
                     'full_remaining': calc_full,
                     'half_remaining': calc_half,
-                    'maneuvered': True if step_maneuver != 'STR' else bool(base_car.get('maneuvered', False)),
+                    'maneuvered': True if step_maneuver not in ['STR', "HALF"] else bool(base_car.get('maneuvered', False)),
                     'timestamp': datetime.now().isoformat()
                 }
                 projected_ghosts.append(ghost_node)
@@ -688,18 +821,22 @@ class GameEngine:
             if not name or name in ["Weapon", "None", "Select Weapon", "No items available"]:
                 idx += 1
                 continue
-    
+ 
             facing = car_record.get(f"self.weapon_armor_facing_{idx}", "Facing")
             qty = GameEngine.to_int(car_record.get(f"self.var_sub_weapon_{idx}_qty", 0), default=0)
-    
+            # PATCH: expose the weapon's category (e.g. "DISCHARGERS") so
+            # the client can skip to-hit calculation for weapon types that
+            # don't have a meaningful aimed shot.
+            category = car_record.get(f"self.selected_weapon_alt_{idx}", "")
+ 
             for unit_num in range(1, qty + 1):
                 action_id = f"weapon-{idx}-{unit_num}"
                 if qty > 1:
                     label = f"Weapon: {name} ({unit_num} of {qty}) ({facing})"
                 else:
                     label = f"Weapon: {name} ({facing})"
-                actions.append({"id": action_id, "label": label, "type": "weapon"})
-    
+                actions.append({"id": action_id, "label": label, "type": "weapon", "category": category})
+ 
             idx += 1
     
         # --- Accessories: always exactly one action per row, no qty explosion ---
@@ -787,11 +924,84 @@ class GameEngine:
             link = next((l for l in links if l["id"] == weapon_id), None)
             if not link or not link.get("members"):
                 return None, None
-            _, first_member_facing = GameEngine.get_weapon_facing_and_name(
-                car_record, link["members"][0]
-            )
-            if first_member_facing is None:
+ 
+            member_facings = []
+            for member_id in link["members"]:
+                # FIX: link members are saved using row_id, not array
+                # position -- translate before resolving. See
+                # _translate_row_id_to_position_id's docstring.
+                translated_id = GameEngine._translate_row_id_to_position_id(member_id)
+                _, member_facing = GameEngine.get_weapon_facing_and_name(car_record, translated_id)
+                if member_facing is not None:
+                    member_facings.append(member_facing)
+ 
+            if not member_facings:
                 return None, None
-            return link["label"], first_member_facing
+ 
+            # If ANY member is Top (turret), the whole link can track the
+            # target the same way a lone turret weapon can -- prefer that
+            # over just using whichever member happens to be listed first.
+            effective_facing = "Top" if "Top" in member_facings else member_facings[0]
+            return link["label"], effective_facing
  
         return None, None
+
+    @staticmethod
+    def get_crew_roster(car_record: dict) -> list:
+        """
+        Reads the crew roster directly from the design snapshot's
+        per-row crew fields (self.crew_title_{i}, self.crew_skill_driver_{i},
+        self.crew_skill_gunner_{i}, self.crew_skill_handgunner_{i}) --
+        the format the crew-rows feature actually writes, replacing the
+        old single-count self.var_driver_gunner_qty approach
+        get_crew_titles() used to synthesize generic titles from.
+ 
+        Returns a list of dicts, each:
+            {"id": "crew_<i>", "title": ..., "skill_driver": int,
+             "skill_gunner": int, "skill_handgunner": int}
+ 
+        "id" (not title) is the stable identifier to use everywhere a
+        crew member needs to be referenced or looked up by -- see the
+        design note above.
+        """
+        roster = []
+        i = 0
+        while f"self.crew_title_{i}" in car_record:
+            roster.append({
+                "id": f"crew_{i}",
+                "title": car_record.get(f"self.crew_title_{i}", ""),
+                "skill_driver": GameEngine.to_int(car_record.get(f"self.crew_skill_driver_{i}", 0), default=0),
+                "skill_gunner": GameEngine.to_int(car_record.get(f"self.crew_skill_gunner_{i}", 0), default=0),
+                "skill_handgunner": GameEngine.to_int(car_record.get(f"self.crew_skill_handgunner_{i}", 0), default=0),
+            })
+            i += 1
+        return roster
+
+    @staticmethod
+    def link_is_smart_link(car_record: dict, member_action_ids: list) -> bool:
+        """
+        Server-side equivalent of the Designer's
+        link_qualifies_for_smart_link(): True if every member of the
+        link is the identical weapon (ammo type ignored) and there's at
+        most one distinct FIXED (non-Top) facing among them.
+        """
+        resolved = []
+        for aid in member_action_ids:
+            translated_id = GameEngine._translate_row_id_to_position_id(aid)
+            name, facing = GameEngine.get_weapon_facing_and_name(car_record, translated_id)
+            if name is None:
+                resolved.append((None, None))
+                continue
+            base_name = name.split(" - ")[0].strip()  # "ammo type doesn't matter"
+            resolved.append((base_name, facing))
+ 
+        if any(name is None for name, facing in resolved):
+            return False
+        names = {name for name, facing in resolved}
+        if len(names) != 1:
+            return False
+        facings = {facing for name, facing in resolved}
+        if len(facings) <= 1:
+            return False
+        fixed_facings = facings - {"Top"}
+        return len(fixed_facings) <= 1

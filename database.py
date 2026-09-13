@@ -13,7 +13,7 @@ def get_db():
     return conn
 
 # ── Games ─────────────────────────────────────────────────────────────────────
-def create_game(name, map_file, max_players, division, created_by, initial_speed,
+def create_game(name, map_file, max_players, division, created_by, min_initial_speed, initial_speed,
                 auto_start=False):
     conn = get_db()
     try:
@@ -30,8 +30,8 @@ def create_game(name, map_file, max_players, division, created_by, initial_speed
         game_id = str(uuid.uuid4())
         conn.execute('''
                         INSERT INTO games (id, name, map, max_players, division,
-                        created_by, created_at, status, initial_speed, auto_start)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_by, created_at, status, min_initial_speed, initial_speed, auto_start)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
             game_id, 
             name, 
@@ -40,7 +40,8 @@ def create_game(name, map_file, max_players, division, created_by, initial_speed
             division, 
             created_by, 
             datetime.now().isoformat(),  # 1st Shifted Fix: Aligned to created_at
-            'waiting',                   # 2nd Shifted Fix: Aligned to status
+            'waiting',                   # 2nd Shifted Fix: Aligned to 
+            min_initial_speed,
             initial_speed,               # 3rd Shifted Fix: Aligned to initial_speed
             1 if auto_start else 0
         ))
