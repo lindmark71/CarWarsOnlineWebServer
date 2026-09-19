@@ -10,6 +10,9 @@ import bcrypt
 import secrets
 import random
 from io import BytesIO
+from flask import send_file, jsonify
+from map_renderer import MapRenderer  # Ensure MapRenderer is imported
+from io import BytesIO
 from PIL import Image
 from flask import send_file
 from functools import wraps
@@ -45,6 +48,11 @@ CREDENTIALS_FILE     = './credentials.json'
 UPLOAD_FOLDER_MAP    = './uploads/maps'
 UPLOAD_FOLDER_DESIGN = './uploads/designs'
 GAME_FOLDER          = './games'
+
+# ── IN-MEMORY CACHE SCHEMA FOR DRIVING PREVIEWS ──
+# Keys will be 'game_id-username', holding the active ProposedCarPosition dict atom
+ACTIVE_PREVIEWS = {}
+
 os.makedirs(UPLOAD_FOLDER_MAP,    exist_ok=True)
 os.makedirs(UPLOAD_FOLDER_DESIGN, exist_ok=True)
 os.makedirs(GAME_FOLDER,          exist_ok=True)
@@ -1467,173 +1475,44 @@ def get_map_max_players(filename):
 def handle_game_maneuver():
     """
     Endpoint executed immediately when a player selects a driving vector button.
-    Validates legal maneuvering allowances, processes vector math previews, 
-    and tracks fractional budget segments natively.
+    Populates the in-memory RAM cache AND triggers the rules engine seamlessly.
+    Defensively guarded against data-type mismatches and null payloads.
     """
-    data = request.get_json() or {}
-    game_id = data.get('game_id', data.get('gameId', '')).strip()
-    username = data.get('username')
-    maneuver = data.get('maneuver', data.get('maneuverCode', '')).strip()
-
-    # Validation check: verify the session cookie matches the player profile
-    if session.get('username') != username:
-        return jsonify({"error": "Unauthorized action profile"}), 403
-
-    if not game_id or not username or not maneuver:
-        return jsonify({"error": "Missing game_id, username, or maneuver in payload"}), 400
-
     try:
-        # 1. Isolate game state layout files
-        game_dir = game_dir_path(game_id)
-        if not os.path.isdir(game_dir):
-            return jsonify({"error": "Active match tracking folder missing."}), 404
-            
-        all_files = os.listdir(game_dir)
-        game_files = sorted([f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')])
+        data = request.get_json() or {}
+        
+        # ── FIXED: Safe typecasting prevents AttributeError crashes on non-string inputs ──
+        game_id = str(data.get('game_id', data.get('gameId', ''))).strip()
+        maneuver = str(data.get('maneuver', data.get('maneuverCode', ''))).strip()
 
-        if not game_files:
-            return jsonify({"error": "Could not identify active game state tracking file"}), 404
+        username = session.get('username')
+        if not username:
+            return jsonify({"error": "Session profile expired. Please log back in."}), 401
 
-        filepath = os.path.join(game_dir, game_files[-1])
-        file_data = read_game_file(filepath)
-
-        # 2. Locate both the basic tracking car node and the global active movement queue block
-        base_car = next((r for r in file_data if str(r.get('CarPosition', '')).replace(' ', '') == 'CarPosition' and r.get('owner') == username), None)
-        mq_entry = next((r for r in file_data if r.get('MovementQueue') == 'MovementQueue'), None)
-
-        if not base_car or not mq_entry:
-            return jsonify({"error": "Vehicle profile metadata or global movement phase context missing."}), 404
-
-        # Extract this specific player's tracking node from inside the movement queue layout array
-        mq_players = mq_entry.get('players', [])
-        queue_player = next((p for p in mq_players if p.get('username') == username), None)
-
-        if not queue_player:
-            return jsonify({"error": "Logged-in driver profile mismatch inside live phase execution registry."}), 400
-
-        # 3. Read live structural capacity values safely
-        full_remaining = int(queue_player.get('full_remaining', 0))
-        half_remaining = float(queue_player.get('half_remaining', 0.0))
-        already_maneuvered = bool(queue_player.get('maneuvered', False))
-        half_selected_available = bool(queue_player.get('half_forced', False))
-        half_selected_already = bool(half_remaining == 0.0) # how many halfs are left?
-
-        is_bend = maneuver not in ['STR', 'HALF']
-        is_half = (maneuver == 'HALF')
-
-        # ── STRICTION ENFORCEMENT FILTER 1: MANEUVER EXHAUSTION ──
-        if is_bend and already_maneuvered:
-            return jsonify({"error": "Maneuver already exhausted this phase step. All remaining movements must be straight travel vectors."}), 400
-
-        # ── STRICTION ENFORCEMENT FILTER 2: EXACTLY 0.5 REMAINING ──
-        if full_remaining == 0 and half_remaining == 0.5 and not is_half:
-            return jsonify({"error": "Illegal selection context. Only a half-step footprint option is valid for the remaining phase balance."}), 400
-
-        # ── STRICTION ENFORCEMENT FILTER 3: TERMINAL FRACTION RULE ──
-        if is_half and half_selected_already:
-            return jsonify({"error": "Fractional choice locked. Once a half-step is executed, all subsequent phase segment motions must be full increments."}), 400
-
-        # 4. Hand off physical asset geometric vector tracking calculations to your GameEngine
-        success, message = GameEngine.process_player_movement(game_id, username, maneuver)
+        if not game_id or game_id == 'None' or not maneuver or maneuver == 'None':
+            return jsonify({"error": "Missing valid game_id or maneuver code parameters in payload"}), 400
+        
+        success, result_data = GameEngine.process_player_movement(game_id, username, maneuver)
         if not success:
-            return jsonify({"error": message}), 400
-
-        # Re-read file records in case Engine calculations appended physical coordinate metrics
-        file_data = read_game_file(filepath)
-
-        # Prune older past unconfirmed ghost nodes for this user to refresh canvas display overlay
-        file_data = [r for r in file_data if not (str(r.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and r.get('owner') == username)]
-
-        # 5. Compute dynamic budget allocations for the targeted GHOST PREVIEW element
-        step_cost = 0.5 if is_half else 1.0
-        calc_rem = round(max(0.0, float(queue_player.get('remaining', 1.0)) - step_cost), 1)
+            return jsonify({"error": result_data}), 400
         
-        # Build precise tracking states that preview the state if this choice gets confirmed
-        preview_full = max(0, full_remaining - (0 if is_half else 1))
-        preview_half = 0.0 if is_half else half_remaining
-        preview_half_forced = True if (is_half and full_remaining > 0) else half_selected_already
-
-        # Normalize physical rotation keys locally to establish safe float lookups
-        normalized_car = {str(k).replace(' ', ''): v for k, v in base_car.items()}
-        current_x = float(normalized_car.get('local_starting_x_qty', 0.0))
-        current_y = float(normalized_car.get('local_starting_y_qty', 0.0))
-        current_angle = float(normalized_car.get('orientation', 0.0))
-
-        # Vector offset calculations matching standard asset sizes
-        CAR_LENGTH = 1.0
-        CAR_WIDTH = 0.5
-
-        if maneuver == 'STR':
-            rad_current = math.radians(current_angle)
-            final_x = current_x + (math.sin(rad_current) * CAR_LENGTH)
-            final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH)
-            final_angle = current_angle
-        elif is_half:
-            rad_current = math.radians(current_angle)
-            final_x = current_x + (math.sin(rad_current) * (CAR_LENGTH / 2.0))
-            final_y = current_y + (-math.cos(rad_current) * (CAR_LENGTH / 2.0))
-            final_angle = current_angle
-        elif is_bend:
-            severity = int(maneuver[1:-1]) if re.search(r'\d+', maneuver) else 1
-            direction = maneuver[-1]
-            delta_degrees = severity * 15
-            rad_start = math.radians(current_angle)
-            mid_x = current_x + (math.sin(rad_start) * (CAR_LENGTH / 2.0))
-            mid_y = current_y + (-math.cos(rad_start) * (CAR_LENGTH / 2.0))
-            r_x, r_y = math.cos(rad_start), math.sin(rad_start)
-
-            if direction == 'L':
-                pivot_x = mid_x - (r_x * (CAR_WIDTH / 2.0))
-                pivot_y = mid_y - (r_y * (CAR_WIDTH / 2.0))
-                rotation_angle = -delta_degrees
-                final_angle = (current_angle - delta_degrees) % 360
-            else:
-                pivot_x = mid_x + (r_x * (CAR_WIDTH / 2.0))
-                pivot_y = mid_y + (r_y * (CAR_WIDTH / 2.0))
-                rotation_angle = delta_degrees
-                final_angle = (current_angle + delta_degrees) % 360
-
-            rad_rotation = math.radians(rotation_angle)
-            dx, dy = mid_x - pivot_x, mid_y - pivot_y
-            rotated_mid_x = pivot_x + (dx * math.cos(rad_rotation) - dy * math.sin(rad_rotation))
-            rotated_mid_y = pivot_y + (dx * math.sin(rad_rotation) + dy * math.cos(rad_rotation))
-            rad_final = math.radians(final_angle)
-            final_x = rotated_mid_x + (math.sin(rad_final) * (CAR_LENGTH / 2.0))
-            final_y = rotated_mid_y + (-math.cos(rad_final) * (CAR_LENGTH / 2.0))
-        else:
-            final_x, final_y, final_angle = current_x, current_y, current_angle
-
-        final_heading_int = int(round(final_angle)) % 360
-
-        # Construct the specialized asset payload mapping metrics accurately to the map canvas pipeline
-        fallback_ghost = {
-            'ProposedCarPosition': 'ProposedCarPosition',
-            'player_number': base_car.get('player_number'),
-            'owner': username,
-            'local_starting_x_qty': round(final_x, 2),
-            'local_starting_y_qty': round(final_y, 2),
-            'heading': final_heading_int,
-            'orientation': float(final_heading_int),
-            'color': base_car.get('color', 'blue'),
-            'car_image_name': base_car.get('car_image_name'),
-            'maneuver_preview_type': maneuver,
-            'remaining': calc_rem,
-            'full_remaining': preview_full,
-            'half_remaining': preview_half,
-            'maneuvered': True if is_bend else already_maneuvered,
-            'half_forced': preview_half_forced,
-            'timestamp': datetime.now().isoformat()
-        }
+        ghost_node = result_data # Catch the dictionary object
         
-        file_data.append(fallback_ghost)
-        write_game_file(filepath, file_data)
+        if ghost_node:
+            # Space-agnostic key normalizer cleanup before memory caching
+            clean_ghost = {str(k).replace(' ', ''): v for k, v in ghost_node.items()}
+            
+            cache_key = f"{game_id}-{username}"
+            ACTIVE_PREVIEWS[cache_key] = clean_ghost # Update high-speed volatile cache
         
-        return jsonify({"status": "success", "message": f"Maneuver vector choice ({maneuver}) successfully staged for preview evaluation."}), 200
+            return jsonify({
+                "status": "success",
+                "ghost": clean_ghost
+            }), 200
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Internal engine calculation crash during route tracking: {str(e)}"}), 500
+        print(f"[CRITICAL ROUTE CRASH] Exception inside handle_game_maneuver: {e}")
+        return jsonify({"error": f"Maneuver preview pipeline tracking crash: {str(e)}"}), 500
 
 @app.route('/api/game/fire', methods=['POST'])
 def handle_game_fire():
@@ -1688,13 +1567,11 @@ def handle_game_confirm_move():
     try:
         file_data = read_game_file(filepath)
 
-        # 1. Harvest the active Proposed preview ghost block to grab dynamic budget logic states
-        ghost_node = next(
-            (r for r in file_data if str(r.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition'
-             and r.get('owner') == username),
-            None
-        )
-
+        # ── 1. HARVEST THE ACTIVE PROPOSED PREVIEW GHOST BLOCK (FIXED KEY NORMALIZATION) ──
+        ghost_node = None
+        cache_key = f"{game_id}-{username}"
+        ghost_node = ACTIVE_PREVIEWS[cache_key] # Update high-speed volatile cache
+        
         # Extract real active maneuver from ghost preview if empty in payload
         if not maneuver or maneuver == 'None' or maneuver == '':
             if ghost_node:
@@ -1702,10 +1579,11 @@ def handle_game_confirm_move():
             else:
                 maneuver = 'STR'
 
+
         # 2. Locate the central system MovementQueue block
         queue_entry = None
         queue_index = None
-        for i, entry in enumerate(file_data):
+        for i, entry in reversed(list(enumerate(file_data))):
             if entry.get('MovementQueue') == 'MovementQueue':
                 queue_entry = entry
                 queue_index = i
@@ -1782,26 +1660,29 @@ def handle_game_confirm_move():
                         except Exception as hc_err:
                             print(f"[HC UPDATE ERROR] Failed executing raw file subtraction parse: {hc_err}")
 
-        # ── 4. STAGE INTEGRATION LOCKDOWN: SYNCHRONIZE METRICS FROM GHOST PREVIEW ── 🛠
+        # ── 4. STAGE INTEGRATION LOCKDOWN: SYNCHRONIZE METRICS FROM IN-MEMORY GHOST CACHE ── 🛠
+        cache_key = f"{game_id}-{username}"
+        
+        # Pull the data properties completely from your memory grid arrays
+        ghost_node = ACTIVE_PREVIEWS.get(cache_key)
+
         if ghost_node:
-            player['full_remaining'] = int(ghost_node.get('full_remaining', 0))
-            player['half_remaining'] = float(ghost_node.get('half_remaining', 0.0))
-            player['remaining'] = round(float(ghost_node.get('remaining', 0.0)), 1)
-            player['maneuvered'] = bool(ghost_node.get('maneuvered', False))
-            player['half_forced'] = bool(ghost_node.get('half_forced', False))
+            for idx, entry in reversed(list(enumerate(file_data))):
+                if (entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username):
+                    file_data[idx]['local_starting_x_qty'] = ghost_node.get('local_starting_x_qty')
+                    file_data[idx]['local_starting_y_qty'] = ghost_node.get('local_starting_y_qty')
+                    file_data[idx]['heading'] = ghost_node.get('heading')
+                    file_data[idx]['orientation'] = ghost_node.get('orientation')
+                    break # Here is where we update the local file_data memory of the game file
+            
+            # Flush the memory token after database confirmation serialization loops close
+            ACTIVE_PREVIEWS.pop(cache_key, None)
+            print(f"[CACHE FLASH CONCLUDED] RAM memory tracking array released for key: {cache_key}")
+            
         else:
-            # Fallback deduction calculation routine if no geometric preview ghost is located
-            is_half = maneuver == 'half'
-            step_cost = 0.5 if is_half else 1.0
-            player['remaining'] = round(max(0.0, float(player['remaining']) - step_cost), 1)
-            if is_half:
-                player['half_remaining'] = 0.0
-                if int(player['full_remaining']) > 0:
-                    player['half_forced'] = True
-            else:
-                player['full_remaining'] = max(0, int(player['full_remaining']) - 1)
-            if is_bend:
-                player['maneuvered'] = True
+            # Fallback traditional increment deduction loop if direct lookups return empty
+            player['full_remaining'] = max(0, int(player.get('full_remaining', 1)) - 1)
+
 
         # Turn progression update markers
         player['moved_this_segment'] = True
@@ -1824,15 +1705,15 @@ def handle_game_confirm_move():
             player['moved_this_segment'] = False
 
         # 5. Commit calculations back down via the central engine pipeline coordinates lock
-        engine_success, engine_msg = GameEngine.confirm_player_movement(game_id, username)
-        if not engine_success:
-            return jsonify({'error': f"Coordinates lock failure: {engine_msg}"}), 400
+        #engine_success, engine_msg = GameEngine.confirm_player_movement(game_id, username)
+        #if not engine_success:
+        #    return jsonify({'error': f"Coordinates lock failure: {engine_msg}"}), 400
 
         # Reload updated log list from engine storage disk map
-        file_data = read_game_file(filepath)
+        #file_data = read_game_file(filepath)
 
-        # Clear preview ghost nodes cleanly upon confirmation completion
-        file_data = [r for r in file_data if not (str(r.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and r.get('owner') == username)]
+        # ── RESTORED: Explicitly remove the old ghost and write the new state matrix back to storage ──
+        #file_data = [r for r in file_data if not (str(r.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and r.get('owner') == username)]
 
         # Check turn management progression triggers
         all_phase_done = all(p['done'] for p in queue_entry['players'])
@@ -1858,16 +1739,16 @@ def handle_game_confirm_move():
             queue_entry['active_player_turn'] = next_mover['username'] if next_mover else username
 
         # Map orientation normalization safeguards
-        for record in file_data:
-            if record.get('CarPosition') == 'CarPosition':
-                record['heading'] = int(round(float(record.get('heading', 0))))
-                record['orientation'] = int(round(float(record.get('orientation', 0))))
+        #for record in reversed(file_data):
+        #    if record.get('CarPosition') == 'CarPosition':
+        #        record['heading'] = int(round(float(record.get('heading', 0))))
+        #        record['orientation'] = int(round(float(record.get('orientation', 0))))
                 # Embed updated movement queue meta fields back inside ledger arrays
-                for idx, entry in enumerate(file_data):
-                    if entry.get('MovementQueue') == 'MovementQueue':
-                        file_data[idx] = queue_entry
-                        break
-                write_game_file(filepath, file_data)
+        for idx, entry in reversed(list(enumerate(file_data))):
+            if entry.get('MovementQueue') == 'MovementQueue':
+                file_data[idx] = queue_entry
+                break
+        write_game_file(filepath, file_data) #let's only write the file once
         return jsonify({'message': f'{username} moved: {maneuver}',
                         'queue': queue_entry,
                         'move_record': move_record,
@@ -2328,38 +2209,127 @@ def calculate_live_to_hit():
         "distance_inches": round(distance, 1),
         "arc_facing": target_arc
     })
-    
+
 @app.route('/render_game_file/<game_id>/<filename>', methods=['GET'])
-@login_required
 def render_game_file(game_id, filename):
-    """
-    Renders a specific phase file belonging to a game's dedicated directory.
-    Separate from /render_map, which only serves pre-game map uploads.
-    """
     filename = os.path.basename(filename)
     map_path = os.path.join(game_dir_path(game_id), filename)
 
     if not os.path.exists(map_path):
-        print(f"[RENDER ERROR] File not found at path: {map_path}")
-        return jsonify({'error': 'Game file target not found'}), 404
+        return jsonify({'error': 'Target game file not found'}), 404
 
     try:
-        from map_renderer import MapRenderer
-        renderer = MapRenderer()
-        image = renderer.render_from_file(map_path)
+        # 1. Read the clean persistent game file into memory as text
+        with open(map_path, 'r', encoding='UTF-8') as f:
+            base_file_content = f.read()
 
+        if base_file_content and not base_file_content.endswith('\n'):
+            base_file_content += '\n'
+
+        # 2. THE COMMUNICATOR: Intercept RAM and find this game's active previews
+        # 2. Check the RAM cache for any transient maneuvers active in this specific game
+         # 2. Check the RAM cache for any transient maneuvers active in this specific game
+        # 2. Check the RAM cache for any transient maneuvers active in this specific game
+        prefix = f"{game_id}-"
+        injected_preview_lines = []
+        
+        # Read file records once to pull baseline positioning metrics for current cars
+        current_game_records = GameEngine.read_game_file(map_path)
+        
+        for key, ghost_node in ACTIVE_PREVIEWS.items():
+            if key.startswith(prefix) and ghost_node:
+                # Isolate the username from the cache key string
+                username = key.rsplit('-', 1)[1] if '-' in key else ''
+                
+                # Create an isolated copy to safely update coordinate maps
+                ghost_copy = ghost_node.copy()
+                ghost_copy['ProposedCarPosition'] = 'ProposedCarPosition'
+                ghost_copy['owner'] = username
+                
+                # Look up the user's permanent, locked-in car position line from disk
+                orig_car = None
+                for record in reversed(current_game_records):
+                    if record.get('CarPosition') == 'CarPosition' and record.get('owner') == username:
+                        orig_car = record
+                        break
+                
+                if orig_car:
+                    # ── 📐 THE LEGACY MANEUVER CORNER-SWING ALGORITHM ──
+                    orig_x = float(orig_car.get('local_starting_x_qty', 0))
+                    orig_y = float(orig_car.get('local_starting_y_qty', 0))
+                    orig_heading = float(orig_car.get('orientation', 0))
+                    ghost_heading = float(ghost_copy.get('orientation', 0))
+                    
+                    # Core dimensions in pixels (matching 21x41 sprite grid assets)
+                    half_w = 10.5
+                    half_h = 20.5
+                    car_len = 41.0
+                    
+                    # Compute center location of base vehicle asset box in pixel units
+                    orig_center_x = orig_x * 40.0 + half_w
+                    orig_center_y = orig_y * 40.0 + half_h
+                    
+                    # Directional unit vectors for original car
+                    rad_o = math.radians(orig_heading)
+                    fwd_x = math.sin(rad_o)
+                    fwd_y = -math.cos(rad_o)
+                    rgt_x = math.cos(rad_o)
+                    rgt_y = math.sin(rad_o)
+                    
+                    # STEP 1: Move center exactly one car length forward along orientation
+                    step1_center_x = orig_center_x + car_len * fwd_x
+                    step1_center_y = orig_center_y + car_len * fwd_y
+                    
+                    # Determine if it's a left or right bend automatically from heading delta
+                    heading_delta = (ghost_heading - orig_heading) % 360
+                    is_right_bend = (0 < heading_delta < 180)
+                    
+                    # STEP 2: Identify the rear pivot corner of the step 1 position
+                    # Right bend = back-right corner; Left bend = back-left corner
+                    side_multiplier = 1.0 if is_right_bend else -1.0
+                    
+                    pivot_x = step1_center_x - half_h * fwd_x + (half_w * side_multiplier) * rgt_x
+                    pivot_y = step1_center_y - half_h * fwd_y + (half_w * side_multiplier) * rgt_y
+                    
+                    # Directional unit vectors for ghost car
+                    rad_g = math.radians(ghost_heading)
+                    gfwd_x = math.sin(rad_g)
+                    gfwd_y = -math.cos(rad_g)
+                    grgt_x = math.cos(rad_g)
+                    grgt_y = math.sin(rad_g)
+                    
+                    # Back-calculate the ghost car center to match its pivot corner exactly
+                    ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
+                    ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
+                    
+                    # Translate aligned center pixels back into standard map grid coordinates
+                    ghost_copy['local_starting_x_qty'] = (ghost_center_x - half_w) / 40.0
+                    ghost_copy['local_starting_y_qty'] = (ghost_center_y - half_h) / 40.0
+                    # ───────────────────────────────────────────────────
+                
+                injected_preview_lines.append(str(ghost_copy) + '\n')
+
+
+        # 3. Combine persistent disk data + transient RAM preview data
+        combined_map_payload = base_file_content + "".join(injected_preview_lines)
+
+        # 4. Stream the combined text string straight into your MapRenderer public entry point
+        renderer = MapRenderer()
+        image = renderer.render_from_string(combined_map_payload)
+
+        # 5. Output the image to the browser
         buffer = BytesIO()
         image.save(buffer, format='PNG')
         buffer.seek(0)
-
+        
         response = send_file(buffer, mimetype='image/png')
+        # Crucial: Stop browser caching so updates appear the millisecond a player steers
         response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
         return response
+
     except Exception as e:
-        print(f'Error rendering game file asset: {e}')
-        return jsonify({'error': 'Failed to render game file'}), 500
+        print(f'Error rendering live memory map stream: {e}')
+        return jsonify({'error': 'Failed to compile map preview output stream'}), 500
 
 @app.route('/game_file_timestamp/<game_id>/<filename>', methods=['GET'])
 @login_required

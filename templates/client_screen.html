@@ -1196,6 +1196,7 @@
         };
         let turnPollTimer      = null;
         let TURN_POLL_MS       = 10000;  // check every 10 seconds during rejoin
+        let currentManeuverGhost = null; // ── STORES RAM GHOST FOR IMMEDIATE CANVAS LAYERING ──
 
         // ── Session Management ────────────────────────────────────────────
         let currentUser = null;
@@ -1278,14 +1279,52 @@
         }
         window.addEventListener('resize', resizeCanvas);
         resizeCanvas();
-
+        
         function drawMap() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // ── 🧪 CRITICAL DIAGNOSTIC ANCHOR ──
+            console.log("[DIAGNOSTIC] drawMap fired. mapState.image status:", !!mapState.image, "Ghost variable state:", typeof currentManeuverGhost !== 'undefined' ? currentManeuverGhost : "UNDEFINED GLOBAL");
+
             if (!mapState.image) return;
+        
             ctx.save();
             ctx.translate(mapState.panX, mapState.panY);
             ctx.scale(mapState.zoom, mapState.zoom);
             ctx.drawImage(mapState.image, 0, 0);
+        
+            // ── RESTORED: Clean, Frame-Safe Synchronous RAM Ghost Drawing Loop ──
+            if (currentManeuverGhost && currentManeuverGhost.imageElement) {
+                const img = currentManeuverGhost.imageElement;
+                
+                // ── 🧪 ADD THESE DIAGNOSTIC LOGS HERE ──
+                console.log("[GHOST CHECK] Object found! Coordinates:", currentManeuverGhost.x, currentManeuverGhost.y);
+                console.log("[GHOST CHECK] Image state - Complete:", img.complete, "Width:", img.naturalWidth, "Source URL:", img.src);
+
+                // Only paint if the preloaded image container asset is fully ready in browser memory
+                if (img.complete && img.naturalWidth !== 0) {
+                    ctx.save();
+        
+                    // Convert game units/inches directly to canvas pixel dimensions (40px factor)
+                    const gx = currentManeuverGhost.x * 40;
+                    const gy = currentManeuverGhost.y * 40;
+                    console.log("[GHOST CHECK] Canvas painting coordinates calculated:", gx, gy);
+
+                    const angleRad = (currentManeuverGhost.orientation * Math.PI) / 180;
+        
+                    // Shift and pivot the drawing origin frame directly over the target grid
+                    ctx.translate(gx, gy);
+                    ctx.rotate(angleRad);
+        
+                    // Enforce your exact tactical 50% transparency opacity mask rules smoothly
+                    ctx.globalAlpha = 0.50;
+        
+                    // Stamp down the car asset using official bounding box metrics: 21x41 pixels
+                    ctx.drawImage(img, -21 / 2, -41 / 2, 21, 41);
+        
+                    ctx.restore();
+                }
+            }
+        
             ctx.restore();
         }
 
@@ -1362,8 +1401,14 @@
         }
 
         function updateZoomLabel() {
-            document.getElementById('zoomLabel').textContent =
-                Math.round(mapState.zoom * 100) + '%';
+            const zoomLabelElement = document.getElementById('zoomLabel') || document.getElementById('zoom-ticker');
+            
+            // ── FIXED: Only update if the element actually exists in your HTML layout ──
+            if (zoomLabelElement) {
+                zoomLabelElement.textContent = Math.round(mapState.zoom * 100) + '%';
+            } else {
+                console.log(`[ZOOM]: ${Math.round(mapState.zoom * 100)}%`);
+            }
         }
 
         wrapper.addEventListener('wheel', (e) => {
@@ -1371,6 +1416,7 @@
             const rect  = wrapper.getBoundingClientRect();
             const delta = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
             applyZoom(mapState.zoom + delta, e.clientX - rect.left, e.clientY - rect.top);
+            drawMap();
         }, { passive: false });
 
         wrapper.addEventListener('mousedown', (e) => {
@@ -2071,8 +2117,20 @@
                     alert(`Successfully joined the game with design: ${design}`);
                 }
                 
-                loadGameFileList(gameId);
-        
+                // ── RESTORED: Explicitly force the engine to re-read and re-display the updated T1P0.txt tracking assets ──
+                if (joinData.game_file) {
+                    console.log(`[ARENA TELEMETRY RESET]: Reloading ledger file to display new vehicle footprints: ${joinData.game_file}`);
+            
+                    // Set your global tracking file references so background updates follow this file context
+                    currentMoveFile = joinData.game_file; 
+            
+                    // Force the Map Canvas engine to completely dump its old layout cache and render the true coordinates!
+                    showMapPreview(joinData.game_file, true, gameId);
+                } else {
+                    // Fallback lookup baseline if the direct payload property returns blank
+                    loadGameFileList(gameId);
+                }
+
             } catch (err) {
                 alert('A network error occurred. Please try again.');
             }
@@ -2809,34 +2867,125 @@
         
         // ── Bottom row buttons ────────────────────────────────────────────
         // Helper function to send a driving maneuver to the server
-        async function sendManeuver(maneuverType) {
-            if (!navState.gameId) {
-                alert("You must be in an active game to move your vehicle!");
+        async function sendManeuver(maneuverCode) {
+            // ── MULTI-CHANNEL EXTRACTION: Fallback cascade gets the live active UUID ──
+            let activeGameId = '';
+            
+            if (typeof currentGameId !== 'undefined' && currentGameId && currentGameId !== "None") {
+                activeGameId = currentGameId;
+            } else if (typeof navState !== 'undefined' && navState.gameId && navState.gameId !== "None") {
+                activeGameId = navState.gameId;
+            } else if (typeof currentManeuverGhost !== 'undefined' && currentManeuverGhost && currentManeuverGhost.gameId) {
+                activeGameId = currentManeuverGhost.gameId;
+            } else {
+                // Final fallback: Attempt to parse it straight out of the active browser URL search params if present
+                const urlParams = new URLSearchParams(window.location.search);
+                activeGameId = urlParams.get('game_id') || urlParams.get('gameId') || '';
+            }
+        
+            // Clean up any lingering whitespace or string-based "None" bugs
+            activeGameId = String(activeGameId).trim();
+            if (activeGameId === "None" || activeGameId === "undefined" || activeGameId === "null") {
+                activeGameId = '';
+            }
+        
+            const activeUser = document.getElementById('topBarUsername') ? document.getElementById('topBarUsername').textContent.trim() : '';
+        
+            // ── DIAGNOSTIC: Watch exactly what values are extracted ──
+            console.log("[MANEUVER VECTOR TRIGGERED] Staging choice:", maneuverCode, "Harvested Game ID:", activeGameId, "User:", activeUser);
+        
+            if (!activeGameId) {
+                console.warn("[GHOST SYSTEM GATED]: Stopped execution. activeGameId resolved to an empty or invalid state.");
                 return;
             }
-
+        
+            if (!activeUser || activeUser === "...") {
+                console.warn("[GHOST SYSTEM GATED]: Stopped execution. Missing active player profile context username.");
+                return;
+            }
+        
             try {
                 const response = await fetch('/api/game/maneuver', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        game_id: navState.gameId,
-                        username: currentUser,
-                        maneuver: maneuverType
+                        game_id: activeGameId,
+                        username: activeUser,
+                        maneuver: maneuverCode
                     })
                 });
-
+        
                 if (response.ok) {
-                    const result = await response.json();
-                    console.log(`Maneuver ${maneuverType} accepted:`, result);
-                    // Instantly force a reload of the game file to update your canvas view
-                    showCurrentGameFile(true);
+                    const data = await response.json();
+                    console.log("[NETWORK RES] Payload received from /api/game/maneuver:", data);
+        
+                    if (data.ghost) {
+                        console.log("[NETWORK RES] data.ghost is valid");
+                        const cleanGhost = {};
+                        Object.keys(data.ghost).forEach(key => {
+                            cleanGhost[key.trim()] = data.ghost[key];
+                        });
+        
+                        if (cleanGhost.car_image_name) {
+                            const imgPreload = new Image();
+                            
+                            // Track both resources to synchronize drawing down smoothly
+                            let carSpriteReady = false;
+                            let backgroundMapReady = false;
+        
+                            const checkAndDraw = () => {
+                                if (carSpriteReady && backgroundMapReady) {
+                                    console.log("[RENDER SYNC] Frame and sprite loaded. Redrawing canvas clean.");
+                                    drawMap();
+                                }
+                            };
+        
+                            imgPreload.onload = () => {
+                                console.log("[IMAGE READY] Ghost sprite asset loaded successfully.");
+                                carSpriteReady = true;
+                                checkAndDraw();
+                            };
+        
+                            imgPreload.src = `/get_car_image/${encodeURIComponent(cleanGhost.car_image_name)}`;
+                            if (imgPreload.complete) {
+                                carSpriteReady = true;
+                            }
+                            
+                            // 1. Instantly replace the single tracking coordinate node in memory
+                            currentManeuverGhost = {
+                                x: parseFloat(cleanGhost.local_starting_x_qty || 0),
+                                y: parseFloat(cleanGhost.local_starting_y_qty || 0),
+                                orientation: parseFloat(cleanGhost.orientation || 0),
+                                imageElement: imgPreload,
+                                gameId: activeGameId
+                            };
+        
+                            // 2. TARGET VALIDATION: Drive a fresh request directly to /render_game_file
+                            if (typeof mapState !== 'undefined' && mapState.image) {
+                                const baseSrc = mapState.image.src.split('?')[0];
+                                
+                                // Always attach event listener before assigning the source
+                                mapState.image.onload = () => {
+                                    console.log("[MAP REFRESHED] Received new server frame containing updated ghost coordinates.");
+                                    backgroundMapReady = true;
+                                    checkAndDraw();
+                                };
+                                
+                                // Fire off the cache-buster update chain
+                                mapState.image.src = `${baseSrc}?t=${Date.now()}`;
+                            } else {
+                                console.warn("[GHOST SYSTEM]: mapState.image object structure missing. Falling back.");
+                                backgroundMapReady = true;
+                                checkAndDraw();
+                            }
+                        }
+                    }
                 } else {
-                    const err = await response.json();
-                    alert(`Maneuver rejected: ${err.error}`);
+                    const errData = await response.json().catch(() => ({}));
+                    console.error("Maneuver vector baseline rejected by server:", errData.error || response.statusText);
                 }
             } catch (err) {
-                console.error("Network error during maneuver execution:", err);
+                console.error("Network crash during ghost positioning sequence:", err);
             }
         }
 
@@ -2987,11 +3136,14 @@
     
             const payload = {
                 game_id: activeGameId,
-                filename: activeFile,
-                maneuver: activeManeuver
+                gameId: activeGameId,       // Double layout matching coverage
+                username: currentUser,       // ── FIXED: Required for backend memory alignment!
+                maneuver: activeManeuver,
+                maneuverCode: activeManeuver
             };
     
             try {
+                console.log("Sending EXACTLY ONE move confirmation network packet:", payload);
                 console.log("Sending EXACTLY ONE move confirmation network packet:", payload);
         
                 const response = await fetch('/api/game/confirm_move', {
@@ -3001,6 +3153,7 @@
                 });
         
                 if (response.ok) {
+                    currentManeuverGhost = null; 
                     const data = await response.json();
                     console.log("Move confirmed cleanly on server:", data);
             
@@ -3043,24 +3196,18 @@
         }
 
         // ── Master Driving Selection Pipeline ─────────────────────────────────
-        async function selectDrivingVector(maneuverCode) {
-            if (!navState.gameId) return;
-            pendingManeuver = maneuverCode;
-    
-            // Set the tracking state variable
-            activePreviewManeuver = maneuverCode;
-    
-            // Clear all past highlights using your true styling class (.app-btn)
-            document.querySelectorAll('.bottom-row .app-btn').forEach(btn => btn.classList.remove('pressed'));
-    
-            // Dynamically highlight the active button by targeting your uppercase HTML IDs (e.g., ID_STR)
-            const btnElement = document.getElementById(`ID_${maneuverCode.toUpperCase()}`);
-            if (btnElement) {
-                btnElement.classList.add('pressed');
-            }
-
-            // Fire vector logic immediately up to GameEngine to add ProposedCarPosition to the file!
-            await sendManeuver(maneuverCode);
+        function selectDrivingVector(maneuverCode) {
+            console.log(`[TACTICAL MOTOR COORDINATOR] Staging vector choice: ${maneuverCode}`);
+            
+            // Highlight pressed dashboard tracking buttons
+            const allButtons = document.querySelectorAll('#movement-controls-panel .app-btn');
+            allButtons.forEach(btn => btn.classList.remove('pressed'));
+            
+            const targetBtn = document.getElementById("ID_" + maneuverCode);
+            if (targetBtn) targetBtn.classList.add('pressed');
+        
+            // Deliver vector request forward down the line
+            sendManeuver(maneuverCode);
         }
 
         // JavaScript Engine Code for client_screen.html

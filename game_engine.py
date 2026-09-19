@@ -249,72 +249,6 @@ class GameEngine:
             return False
 
     @classmethod
-    def confirm_player_movement2(cls, game_id, username):
-        """
-        Promotes EXACTLY ONE segment length from ProposedCarPosition to CarPosition per click.
-        Deductions scale down sequentially, keeping multi-step turns alternating smoothly.
-        """
-        import os
-        try:
-            game_files = [f for f in os.listdir(GAME_FOLDER) if f.startswith(game_id) and f.endswith('.txt')]
-            if not game_files: 
-                return False, "No active game files found."
-            game_files.sort()
-            filepath = os.path.join(GAME_FOLDER, game_files[-1])
-            game_records = cls.read_game_file(filepath)
-            
-            # 1. Locate the exact ghost node representing our CURRENT active step segment
-            proposed_car = None
-            for record in game_records:
-                norm_record = {str(k).replace(' ', ''): v for k, v in record.items()}
-                if (norm_record.get('ProposedCarPosition') == 'ProposedCarPosition'
-                        and norm_record.get('owner') == username
-                        and int(float(norm_record.get('segment_index', 1))) == 1):
-                    proposed_car = norm_record
-                    break
-                    
-            if not proposed_car:
-                return False, "No active single-segment preview path coordinates found to lock down."
-                
-            cleaned_records = []
-            for record in game_records:
-                norm_rec = {str(k).replace(' ', ''): v for k, v in record.items()}
-                
-                # SEGMENT FILTER FIX: Delete ONLY segment index 1 since it's the only one being promoted!
-                if norm_rec.get('ProposedCarPosition') == 'ProposedCarPosition' and norm_rec.get('owner') == username:
-                    seg_idx = int(float(norm_rec.get('segment_index', 1)))
-                    if seg_idx == 1:
-                        continue # Consume and delete this active step layer
-                    else:
-                        # Demote subsequent pending ghost segment indexes down by 1 so they hit index 1 on your next choice!
-                        record['segment_index'] = seg_idx - 1
-                        cleaned_records.append(record)
-                        continue
-                        
-                # Update your permanent vehicle position using ONLY the current segment data
-                if norm_rec.get('CarPosition') == 'CarPosition' and norm_rec.get('owner') == username:
-                    record['local_starting_x_qty'] = float(proposed_car['local_starting_x_qty'])
-                    record['local_starting_y_qty'] = float(proposed_car['local_starting_y_qty'])
-                    record['heading'] = int(round(float(proposed_car['heading'])))
-                    record['orientation'] = int(round(float(proposed_car['orientation'])))
-                    record['last_committed_maneuver'] = proposed_car.get('maneuver_preview_type', 'STR')
-                    
-                    # Update core attributes to match current segment state limits
-                    record['remaining'] = float(proposed_car.get('remaining', 0.0))
-                    record['full_remaining'] = int(float(proposed_car.get('full_remaining', 0)))
-                    record['half_remaining'] = float(proposed_car.get('half_remaining', 0.0))
-                    record['maneuvered'] = bool(proposed_car.get('maneuvered', False))
-                    
-                cleaned_records.append(record)
-                
-            if cls.write_game_file(filepath, cleaned_records):
-                return True, "Current movement segment advanced and structural queues shifted."
-                
-            return False, "Failed writing updates to disk."
-        except Exception as e:
-            return False, f"Engine confirmation failure: {str(e)}"
-    
-    @classmethod
     def confirm_player_movement(cls, game_id, username):
         """
         Promotes EXACTLY ONE segment length from ProposedCarPosition to CarPosition per click.
@@ -387,356 +321,99 @@ class GameEngine:
             return False, "Failed writing updates to disk."
         except Exception as e:
             return False, f"Engine confirmation failure: {str(e)}"
-        
-    @staticmethod
-    def process_player_movement2(game_id: str, username: str, maneuver: str) -> tuple[bool, str]:
-        """
-        Generates a multi-step phase projection path. Checks the vehicle's speed 
-        to determine the required car lengths, chains calculations together sequentially, 
-        and enforces rule restrictions safely with explicit data typing constraints.
-        """
-        # 1. IDENTIFY AND LOAD THE ACTIVE PHASE FILE
-        all_files = os.listdir(GAME_FOLDER)
-        game_files = sorted([f for f in all_files if f.startswith(game_id) and f.endswith('.txt')])
-            
-        if not game_files:
-            return False, "Could not identify active game state tracking file"
-                
-        filepath = os.path.join(GAME_FOLDER, game_files[-1])
-        file_data = GameEngine.read_game_file(filepath)
-            
-        if not file_data:
-            return False, "Active game state file is empty or corrupted"
-                
-        # 2. LOCATE TARGET ACTIVE VEHICLE AND MOVEMENT QUEUE METADATA
-        base_car = next(
-            (record for record in file_data
-            if str(record.get('CarPosition', '')).replace(' ', '') == 'CarPosition' and record.get('owner') == username),
-            None
-        )
-            
-        if not base_car:
-            return False, f"No active CarPosition record found for player: {username}"
-                
-        movement_queue = next(
-            (record for record in file_data if str(record.get('MovementQueue', '')).replace(' ', '') == 'MovementQueue'), 
-            {}
-        )
-        current_phase = int(movement_queue.get('phase', 1))
-        current_speed = int(base_car.get('current_speed', 0))
-            
-        # 3. EVALUATE TOTAL REQUIRED LENGTHS SECURELY
-        from game_tables import get_phase_movement
-        try:
-            total_lengths = int(get_phase_movement(current_speed, current_phase))
-        except Exception:
-            total_lengths = 0
-                
-        maneuver = maneuver.upper().strip()
-            
-        # 4. INITIALIZE THE PLAN ARRAY EXPLICITLY
-        maneuver_plan = []
-        if maneuver == 'STR' or maneuver == '':
-            maneuver_plan = ['STR'] * total_lengths
-        else:
-            maneuver_plan.append(maneuver)
-            if total_lengths > 1:
-                maneuver_plan.extend(['STR'] * (total_lengths - 1))
-                    
-        # 5. RUN CHRONOLOGICAL SEGMENT LOOP RUNS
-        current_x = float(base_car.get('local_starting_x_qty', 0.0))
-        current_y = float(base_car.get('local_starting_y_qty', 0.0))
-        current_angle = float(base_car.get('orientation', 0.0))
-            
-        player_num_clean = int(float(base_car.get('player_number', 1)))
-        car_color_clean = str(base_car.get('color', 'blue'))
-        car_image_name = str(base_car.get('car_image_name', 'blue_car'))
-            
-        CAR_LENGTH = 1.0
-        CAR_WIDTH = 0.5
-        projected_ghosts = []
-            
-        for idx, step_maneuver in enumerate(maneuver_plan):
-            try:
-                # --- CASE A: SEGMENT TRAJECTORY IS STRAIGHT ---
-                if step_maneuver == 'STR':
-                    rad_current = math.radians(current_angle)
-                    final_x = current_x + (math.sin(rad_current) * CAR_LENGTH)
-                    final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH)
-                    final_angle = current_angle
-                        
-                # --- CASE B: SEGMENT TRAJECTORY IS A COMPOUND MIDPOINT BEND ---
-                elif step_maneuver.startswith('D') and len(step_maneuver) >= 3 and step_maneuver[-1] in ['L', 'R']:
-                    severity = int(step_maneuver[1:-1])
-                    direction = step_maneuver[-1]
-                    delta_degrees = severity * 15
-                        
-                    rad_start = math.radians(current_angle)
-                    mid_x = current_x + (math.sin(rad_start) * (CAR_LENGTH / 2.0))
-                    mid_y = current_y + (-math.cos(rad_start) * (CAR_LENGTH / 2.0))
-                    r_x = math.cos(rad_start)
-                    r_y = math.sin(rad_start)
-                        
-                    if direction == 'L':
-                        pivot_x = mid_x - (r_x * (CAR_WIDTH / 2.0))
-                        pivot_y = mid_y - (r_y * (CAR_WIDTH / 2.0))
-                        rotation_angle = -delta_degrees
-                        final_angle = (current_angle - delta_degrees) % 360
-                    else:
-                        pivot_x = mid_x + (r_x * (CAR_WIDTH / 2.0))
-                        pivot_y = mid_y + (r_y * (CAR_WIDTH / 2.0))
-                        rotation_angle = delta_degrees
-                        final_angle = (current_angle + delta_degrees) % 360
-                            
-                    # FIX: Safely bind rad_rotation so it can be verified cleanly down the script frame
-                    rad_rotation = math.radians(rotation_angle)
-                    dx = mid_x - pivot_x
-                    dy = mid_y - pivot_y
-                    rotated_mid_x = pivot_x + (dx * math.cos(rad_rotation) - dy * math.sin(rad_rotation))
-                    rotated_mid_y = pivot_y + (dx * math.sin(rad_rotation) + dy * math.cos(rad_rotation))
-                        
-                    rad_final = math.radians(final_angle)
-                    final_x = rotated_mid_x + (math.sin(rad_final) * (CAR_LENGTH / 2.0))
-                    final_y = rotated_mid_y + (-math.cos(rad_final) * (CAR_LENGTH / 2.0))
-                else:
-                    continue
-                        
-                final_heading_int = int(round(final_angle)) % 360
-                    
-                # Deduct lengths sequentially per individual array block slice
-                step_cost = 0.5 if step_maneuver == 'half' else 1.0
-                total_remaining = float(base_car.get('remaining', 2.0))
-                full_remaining = int(base_car.get('full_remaining', 2))
-                half_remaining = float(base_car.get('half_remaining', 0.0))
-                    
-                if step_maneuver == 'half':
-                    calc_rem = round(max(0.0, total_remaining - (idx * 0.5)), 1)
-                    calc_full = full_remaining
-                    calc_half = 0.0
-                else:
-                    calc_rem = round(max(0.0, total_remaining - (idx * 1.0) - step_cost), 1)
-                    calc_full = max(0, full_remaining - idx - 1)
-                    calc_half = half_remaining
-                    
-                ghost_node = {
-                    'ProposedCarPosition': 'ProposedCarPosition',
-                    'player_number': player_num_clean,
-                    'owner': username,
-                    'local_starting_x_qty': round(final_x, 2),
-                    'local_starting_y_qty': round(final_y, 2),
-                    'heading': final_heading_int,
-                    'orientation': float(final_heading_int),
-                    'color': car_color_clean,
-                    'car_image_name': car_image_name,
-                    'maneuver_preview_type': step_maneuver,
-                    'segment_index': int(idx + 1),
-                    'total_segments': int(total_lengths),
-                    'remaining': calc_rem,
-                    'full_remaining': calc_full,
-                    'half_remaining': calc_half,
-                    'maneuvered': True if step_maneuver != 'STR' else bool(base_car.get('maneuvered', False)),
-                    'timestamp': datetime.now().isoformat()
-                }
-                projected_ghosts.append(ghost_node)
-                    
-                # Update tracking constraints for chained calculations
-                current_x = final_x
-                current_y = final_y
-                current_angle = final_angle
-                    
-            except Exception as loop_err:
-                return False, f"Internal engine calculation crash during route handling: {str(loop_err)}"
-                    
-        # COMMIT PROJECTIONS BACK DOWN TO DISK
-        cleaned_file_data = [
-            record for record in file_data 
-            if not (str(record.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and record.get('owner') == username)
-        ]
-        cleaned_file_data.extend(projected_ghosts)
-        GameEngine.write_game_file(filepath, cleaned_file_data)
-            
-        return True, f"Generated path projection matrix chain containing {total_lengths} steps."
     
     @staticmethod
-    def process_player_movement(game_id: str, username: str, maneuver: str) -> tuple[bool, str]:
+    def process_player_movement(game_id, username, maneuver):
         """
-        Generates a multi-step phase projection path. Checks the vehicle's speed 
-        to determine the required car lengths, chains calculations together sequentially, 
-        and enforces rule restrictions safely with explicit data typing constraints.
+        Computes the trajectory vector for a maneuver choice completely in RAM.
+        DOES NOT write to the file on disk — returns the ghost node dictionary 
+        directly to the web server route to eliminate file-lock contentions.
         """
-        # 1. IDENTIFY AND LOAD THE ACTIVE PHASE FILE
-        game_dir = os.path.join(GAME_FOLDER, game_id)
+        import os
+        import re
+        import ast
+        import math
+
+        # 1. Self-contained path composition to find the game folder
+        game_dir = os.path.join('./games', str(game_id).strip())
         if not os.path.isdir(game_dir):
-            return False, "Could not identify active game state tracking directory"
-    
-        game_files = [
-            f for f in os.listdir(game_dir)
-            if re.match(r'^T\d+P', f) and f.endswith('.txt')
-        ]
-        game_files.sort()
-    
+            return False, f"Game state directory not found for ID: {game_id}"
+
+        # Resolve the latest active tracking log file path
+        game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
         if not game_files:
-            return False, "Could not identify active game state tracking file"
-    
+            return False, "No active phase tracking logs found."
+            
         filepath = os.path.join(game_dir, game_files[-1])
-        file_data = GameEngine.read_game_file(filepath)
-    
-        if not file_data:
-            return False, "Active game state file is empty or corrupted"
-    
-        # 2. LOCATE TARGET ACTIVE VEHICLE AND MOVEMENT QUEUE METADATA
-        base_car = next(
-            (record for record in file_data
-             if str(record.get('CarPosition', '')).replace(' ', '') == 'CarPosition' and record.get('owner') == username),
-            None
-        )
-    
-        if not base_car:
-            return False, f"No active CarPosition record found for player: {username}"
-    
-        movement_queue = next(
-            (record for record in file_data if str(record.get('MovementQueue', '')).replace(' ', '') == 'MovementQueue'), 
-            {}
-        )
-        current_phase = int(movement_queue.get('phase', 1))
-        current_speed = int(base_car.get('current_speed', 0))
-    
-        # 3. EVALUATE TOTAL REQUIRED LENGTHS SECURELY
-        from game_tables import get_phase_movement
+        
+        # 2. Read the tracking ledger file row-by-row and parse into dictionaries
+        file_data = []
         try:
-            total_lengths = int(get_phase_movement(current_speed, current_phase))
-        except Exception:
-            total_lengths = 0
-    
-        maneuver = maneuver.upper().strip()
-    
-        # 4. INITIALIZE THE PLAN ARRAY EXPLICITLY
-        maneuver_plan = []
-        if maneuver == 'STR' or maneuver == '':
-            maneuver_plan = ['STR'] * total_lengths
-        else:
-            maneuver_plan.append(maneuver)
-            if total_lengths > 1:
-                maneuver_plan.extend(['STR'] * (total_lengths - 1))
-    
-        # 5. RUN CHRONOLOGICAL SEGMENT LOOP RUNS
-        current_x = float(base_car.get('local_starting_x_qty', 0.0))
-        current_y = float(base_car.get('local_starting_y_qty', 0.0))
-        current_angle = float(base_car.get('orientation', 0.0))
-    
-        player_num_clean = int(float(base_car.get('player_number', 1)))
-        car_color_clean = str(base_car.get('color', 'blue'))
-        car_image_name = str(base_car.get('car_image_name', 'blue_car'))
-    
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped:
+                        file_data.append(ast.literal_eval(stripped))
+        except Exception as read_err:
+            return False, f"Failed parsing tracking logs: {str(read_err)}"
+        
+        # 3. Extract the active player's baseline car position entry using space-agnostic matching
+        car_node = None
+        for r in file_data:
+            if isinstance(r, dict):
+                norm_r = {str(k).replace(' ', ''): v for k, v in r.items()}
+                if norm_r.get('CarPosition') == 'CarPosition' and norm_r.get('owner') == username:
+                    car_node = r
+                    break
+
+        if not car_node:
+            return False, "Car positioning matrix was not found for the active player profile."
+
+        # Extract current spatial coordinates from the car entry
+        norm_car = {str(k).replace(' ', ''): v for k, v in car_node.items()}
+        current_x = float(norm_car.get('local_starting_x_qty', 0.0))
+        current_y = float(norm_car.get('local_starting_y_qty', 0.0))
+        current_angle = float(norm_car.get('orientation', 0.0))
+
+        # ── 📐 CORE VECTOR GEOMETRIC PHYSICS CALCULATIONS ──
         CAR_LENGTH = 1.0
-        CAR_WIDTH = 0.5
-        projected_ghosts = []
-    
-        for idx, step_maneuver in enumerate(maneuver_plan):
-            try:
-                # --- CASE A: SEGMENT TRAJECTORY IS STRAIGHT ---
-                if step_maneuver == 'STR':
-                    rad_current = math.radians(current_angle)
-                    final_x = current_x + (math.sin(rad_current) * CAR_LENGTH)
-                    final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH)
-                    final_angle = current_angle
-                elif step_maneuver == 'HALF':
-                    rad_current = math.radians(current_angle)
-                    final_x = current_x + (math.sin(rad_current) * CAR_LENGTH / 2)
-                    final_y = current_y + (-math.cos(rad_current) * CAR_LENGTH / 2)
-                    final_angle = current_angle
-    
-                # --- CASE B: SEGMENT TRAJECTORY IS A COMPOUND MIDPOINT BEND ---
-                elif step_maneuver.startswith('D') and len(step_maneuver) >= 3 and step_maneuver[-1] in ['L', 'R']:
-                    severity = int(step_maneuver[1:-1])
-                    direction = step_maneuver[-1]
-                    delta_degrees = severity * 15
-    
-                    rad_start = math.radians(current_angle)
-                    mid_x = current_x + (math.sin(rad_start) * (CAR_LENGTH / 2.0))
-                    mid_y = current_y + (-math.cos(rad_start) * (CAR_LENGTH / 2.0))
-                    r_x = math.cos(rad_start)
-                    r_y = math.sin(rad_start)
-    
-                    if direction == 'L':
-                        pivot_x = mid_x - (r_x * (CAR_WIDTH / 2.0))
-                        pivot_y = mid_y - (r_y * (CAR_WIDTH / 2.0))
-                        rotation_angle = -delta_degrees
-                        final_angle = (current_angle - delta_degrees) % 360
-                    else:
-                        pivot_x = mid_x + (r_x * (CAR_WIDTH / 2.0))
-                        pivot_y = mid_y + (r_y * (CAR_WIDTH / 2.0))
-                        rotation_angle = delta_degrees
-                        final_angle = (current_angle + delta_degrees) % 360
-    
-                    # FIX: Safely bind rad_rotation so it can be verified cleanly down the script frame
-                    rad_rotation = math.radians(rotation_angle)
-                    dx = mid_x - pivot_x
-                    dy = mid_y - pivot_y
-                    rotated_mid_x = pivot_x + (dx * math.cos(rad_rotation) - dy * math.sin(rad_rotation))
-                    rotated_mid_y = pivot_y + (dx * math.sin(rad_rotation) + dy * math.cos(rad_rotation))
-    
-                    rad_final = math.radians(final_angle)
-                    final_x = rotated_mid_x + (math.sin(rad_final) * (CAR_LENGTH / 2.0))
-                    final_y = rotated_mid_y + (-math.cos(rad_final) * (CAR_LENGTH / 2.0))
-                else:
-                    continue
-    
-                final_heading_int = int(round(final_angle)) % 360
-    
-                # Deduct lengths sequentially per individual array block slice
-                step_cost = 0.5 if step_maneuver == 'half' else 1.0
-                total_remaining = float(base_car.get('remaining', 2.0))
-                full_remaining = int(base_car.get('full_remaining', 2))
-                half_remaining = float(base_car.get('half_remaining', 0.0))
-    
-                if step_maneuver == 'half':
-                    calc_rem = round(max(0.0, total_remaining - (idx * 0.5)), 1)
-                    calc_full = full_remaining
-                    calc_half = 0.0
-                else:
-                    calc_rem = round(max(0.0, total_remaining - (idx * 1.0) - step_cost), 1)
-                    calc_full = max(0, full_remaining - idx - 1)
-                    calc_half = half_remaining
-    
-                ghost_node = {
-                    'ProposedCarPosition': 'ProposedCarPosition',
-                    'player_number': player_num_clean,
-                    'owner': username,
-                    'local_starting_x_qty': round(final_x, 2),
-                    'local_starting_y_qty': round(final_y, 2),
-                    'heading': final_heading_int,
-                    'orientation': float(final_heading_int),
-                    'color': car_color_clean,
-                    'car_image_name': car_image_name,
-                    'maneuver_preview_type': step_maneuver,
-                    'segment_index': int(idx + 1),
-                    'total_segments': int(total_lengths),
-                    'remaining': calc_rem,
-                    'full_remaining': calc_full,
-                    'half_remaining': calc_half,
-                    'maneuvered': True if step_maneuver not in ['STR', "HALF"] else bool(base_car.get('maneuvered', False)),
-                    'timestamp': datetime.now().isoformat()
-                }
-                projected_ghosts.append(ghost_node)
-    
-                # Update tracking constraints for chained calculations
-                current_x = final_x
-                current_y = final_y
-                current_angle = final_angle
-    
-            except Exception as loop_err:
-                return False, f"Internal engine calculation crash during route handling: {str(loop_err)}"
-    
-        # COMMIT PROJECTIONS BACK DOWN TO DISK
-        cleaned_file_data = [
-            record for record in file_data 
-            if not (str(record.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and record.get('owner') == username)
-        ]
-        cleaned_file_data.extend(projected_ghosts)
-        GameEngine.write_game_file(filepath, cleaned_file_data)
-    
-        return True, f"Generated path projection matrix chain containing {total_lengths} steps."
+        final_angle = current_angle
+
+        if maneuver == 'STR':
+            rad = math.radians(current_angle)
+            final_x = current_x + (math.sin(rad) * CAR_LENGTH)
+            final_y = current_y + (-math.cos(rad) * CAR_LENGTH)
+        elif maneuver == 'HALF':
+            rad = math.radians(current_angle)
+            final_x = current_x + (math.sin(rad) * (CAR_LENGTH / 2.0))
+            final_y = current_y + (-math.cos(rad) * (CAR_LENGTH / 2.0))
+        elif maneuver.startswith('D'):  # Bend severity turning arc matrix tracking
+            severity = int(maneuver[1:-1]) if re.search(r'\d+', maneuver) else 1
+            direction = maneuver[-1]
+            delta = severity * 15
+            final_angle = (current_angle - delta if direction == 'L' else current_angle + delta) % 360
+            rad = math.radians(final_angle)
+            final_x = current_x + (math.sin(rad) * CAR_LENGTH)
+            final_y = current_y + (-math.cos(rad) * CAR_LENGTH)
+        else:
+            final_x, final_y = current_x, current_y
+        
+        # 4. Construct the transient ghost node atom completely in RAM
+        ghost_node = {
+            'ProposedCarPosition': 'ProposedCarPosition',
+            'player_number': car_node.get('player_number'),
+            'owner': username,
+            'local_starting_x_qty': round(final_x, 2),
+            'local_starting_y_qty': round(final_y, 2),
+            'heading': int(round(final_angle)) % 360,
+            'orientation': float(int(round(final_angle)) % 360),
+            'color': car_node.get('color', 'blue'),
+            'car_image_name': car_node.get('car_image_name', 'default_car.png'),
+            'maneuver_preview_type': maneuver
+        }
+        
+        # ── FIXED: Return the constructed node directly in RAM instead of calling write_game_file() ──
+        return True, ghost_node
     
     @staticmethod
     def extract_pixel_vertices(map_entry, car_length=1.0, car_width=0.5):
