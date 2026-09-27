@@ -1607,6 +1607,14 @@ def handle_game_confirm_move():
         if player is None:
             return jsonify({'error': 'Not your turn, already moved this segment, or done with phase'}), 400
 
+        is_half = maneuver == "HALF"
+        if is_half:
+            player['remaining'] = player['remaining'] - 0.5
+            player['half_remaining'] = player['half_remaining'] - 0.5
+        else:
+            player['remaining'] = player['remaining'] - 1.0
+            player['full_remaining'] = player['full_remaining'] - 1
+
         first_active = next((p for p in players if not p['done'] and not p['moved_this_segment']), None)
         if first_active is None or first_active['username'] != username:
             return jsonify({'error': 'It is currently not your turn to execute a move based on speed initiative'}), 400
@@ -1660,28 +1668,124 @@ def handle_game_confirm_move():
                         except Exception as hc_err:
                             print(f"[HC UPDATE ERROR] Failed executing raw file subtraction parse: {hc_err}")
 
-        # ── 4. STAGE INTEGRATION LOCKDOWN: SYNCHRONIZE METRICS FROM IN-MEMORY GHOST CACHE ── 🛠
+        # ── 4. STAGE INTEGRATION LOCKDOWN: APPLY UNIFIED REAR-PIVOT SWING ALGORITHM ── 🛠
         cache_key = f"{game_id}-{username}"
-        
-        # Pull the data properties completely from your memory grid arrays
         ghost_node = ACTIVE_PREVIEWS.get(cache_key)
 
         if ghost_node:
+            # 1. Pull the permanent baseline car data from the file_data structure
+            orig_car = None
+            car_idx = None
             for idx, entry in reversed(list(enumerate(file_data))):
-                if (entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username):
-                    file_data[idx]['local_starting_x_qty'] = ghost_node.get('local_starting_x_qty')
-                    file_data[idx]['local_starting_y_qty'] = ghost_node.get('local_starting_y_qty')
-                    file_data[idx]['heading'] = ghost_node.get('heading')
-                    file_data[idx]['orientation'] = ghost_node.get('orientation')
-                    break # Here is where we update the local file_data memory of the game file
-            
-            # Flush the memory token after database confirmation serialization loops close
+                if entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username:
+                    orig_car = entry
+                    car_idx = idx
+                    break
+
+            if orig_car:
+                # Harvest your tracking parameters
+                orig_x = float(orig_car.get('local_starting_x_qty', 0))
+                orig_y = float(orig_car.get('local_starting_y_qty', 0))
+                orig_heading = float(orig_car.get('orientation', 0))
+                ghost_heading = float(ghost_node.get('orientation', 0))
+                
+                # Rigid chassis pixel bounds (21x41 template scale assets)
+                half_w = 10.5
+                half_h = 20.5
+                car_len = 41.0
+                
+                # Compute original pixel coordinate centers
+                orig_center_x = orig_x * 40.0 + half_w
+                orig_center_y = orig_y * 40.0 + half_h
+                
+                # Map vector headings
+                rad_o = math.radians(orig_heading)
+                fwd_x, fwd_y = math.sin(rad_o), -math.cos(rad_o)
+                rgt_x, rgt_y = math.cos(rad_o), math.sin(rad_o)
+                
+                # Step forward exactly one car length line distance
+                step1_center_x = orig_center_x + car_len * fwd_x
+                step1_center_y = orig_center_y + car_len * fwd_y
+                
+                # Identify if it's a left or right turn
+                heading_delta = (ghost_heading - orig_heading) % 360
+                is_right_bend = (0 < heading_delta < 180)
+                
+                # Pivot exactly on the rear corner axis point
+                side_multiplier = 1.0 if is_right_bend else -1.0
+                pivot_x = step1_center_x - half_h * fwd_x + (half_w * side_multiplier) * rgt_x
+                pivot_y = step1_center_y - half_h * fwd_y + (half_w * side_multiplier) * rgt_y
+                
+                # Ghost vectors
+                rad_g = math.radians(ghost_heading)
+                gfwd_x, gfwd_y = math.sin(rad_g), -math.cos(rad_g)
+                grgt_x, grgt_y = math.cos(rad_g), math.sin(rad_g)
+                
+                # Back-calculate the absolute pixel center point
+                ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
+                ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
+                
+                # ── SYNC: Save the exact corrected float properties into your permanent file entry ──
+                file_data[car_idx]['local_starting_x_qty'] = float((ghost_center_x - half_w) / 40.0)
+                file_data[car_idx]['local_starting_y_qty'] = float((ghost_center_y - half_h) / 40.0)
+                file_data[car_idx]['orientation'] = int(round(ghost_heading))
+                file_data[car_idx]['heading'] = int(round(ghost_heading))
+                
+                print(f"[SYNC SUCCESS] Locked permanent coordinates to match rendering matrix layout points.")
+
+            # Flush volatile preview cache maps out of memory registers safely
             ACTIVE_PREVIEWS.pop(cache_key, None)
-            print(f"[CACHE FLASH CONCLUDED] RAM memory tracking array released for key: {cache_key}")
+            print(f"[CACHE FLASH CONCLUDED] Volatile cache released for key: {cache_key}")
             
         else:
             # Fallback traditional increment deduction loop if direct lookups return empty
             player['full_remaining'] = max(0, int(player.get('full_remaining', 1)) - 1)
+
+
+#        # ── 4. STAGE INTEGRATION LOCKDOWN: SYNCHRONIZE METRICS FROM IN-MEMORY GHOST CACHE ── 🛠
+#        cache_key = f"{game_id}-{username}"
+#        
+#        # Pull the data properties completely from your memory grid arrays
+#        ghost_node = ACTIVE_PREVIEWS.get(cache_key)
+#
+#        if ghost_node:
+#            for idx, entry in reversed(list(enumerate(file_data))):
+#                if (entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username):
+#                    
+#                    # ── CORRECTED MAPPING LAYER ──
+#                    # 1. Harvest raw values safely from your temporary preview node
+#                    raw_x = ghost_node.get('local_starting_x_qty') or ghost_node.get('x') or ghost_node.get('ghost_x')
+#                    raw_y = ghost_node.get('local_starting_y_qty') or ghost_node.get('y') or ghost_node.get('ghost_y')
+#                    raw_heading = ghost_node.get('heading') or ghost_node.get('ghost_heading')
+#                    raw_orientation = ghost_node.get('orientation') or ghost_node.get('ghost_orientation') or ghost_node.get('heading')
+#
+#                    # 2. Force absolute numeric conversions to strip away string concatenation bugs
+#                    if raw_x is not None: 
+#                        file_data[idx]['local_starting_x_qty'] = float(raw_x)
+#                    if raw_y is not None: 
+#                        file_data[idx]['local_starting_y_qty'] = float(raw_y)
+#                    if raw_heading is not None: 
+#                        file_data[idx]['heading'] = int(round(float(raw_heading)))
+#                    if raw_orientation is not None: 
+#                        file_data[idx]['orientation'] = int(round(float(raw_orientation)))
+#                    
+#                    
+#                    print(f"[MUTATION SUCCESS] Copied Ghost parameters into CarPosition for {username} -> X: {raw_x}, Y: {raw_y}, Orientation: {raw_orientation}")
+#                    break 
+#
+#                    #file_data[idx]['local_starting_x_qty'] = ghost_node.get('local_starting_x_qty')
+#                    #file_data[idx]['local_starting_y_qty'] = ghost_node.get('local_starting_y_qty')
+#                    #file_data[idx]['heading'] = ghost_node.get('heading')
+#                    #file_data[idx]['orientation'] = ghost_node.get('orientation')
+#                    #break # Here is where we update the local file_data memory of the game file
+#            
+#            # Flush the memory token after database confirmation serialization loops close
+#            ACTIVE_PREVIEWS.pop(cache_key, None)
+#            print(f"[CACHE FLASH CONCLUDED] RAM memory tracking array released for key: {cache_key}")
+#            
+#        else:
+#            # Fallback traditional increment deduction loop if direct lookups return empty
+#            player['full_remaining'] = max(0, int(player.get('full_remaining', 1)) - 1)
 
 
         # Turn progression update markers
@@ -1705,20 +1809,14 @@ def handle_game_confirm_move():
             player['moved_this_segment'] = False
 
         # 5. Commit calculations back down via the central engine pipeline coordinates lock
-        #engine_success, engine_msg = GameEngine.confirm_player_movement(game_id, username)
-        #if not engine_success:
-        #    return jsonify({'error': f"Coordinates lock failure: {engine_msg}"}), 400
-
-        # Reload updated log list from engine storage disk map
-        #file_data = read_game_file(filepath)
-
-        # ── RESTORED: Explicitly remove the old ghost and write the new state matrix back to storage ──
-        #file_data = [r for r in file_data if not (str(r.get('ProposedCarPosition', '')).replace(' ', '') == 'ProposedCarPosition' and r.get('owner') == username)]
 
         # Check turn management progression triggers
         all_phase_done = all(p['done'] for p in queue_entry['players'])
         queue_entry['game_name'] = queue_entry.get('game_name', 'Hammer Downs Arena')
         queue_entry['turn_count'] = queue_entry.get('turn_count', 1)
+
+        # Initialize target file path destination variable
+        save_destination = filepath 
 
         if all_phase_done:
             queue_entry['complete'] = True
@@ -1732,6 +1830,16 @@ def handle_game_confirm_move():
                 queue_entry['active_player_turn'] = fastest_car.get('owner', 'Player 1')
             else:
                 queue_entry['active_player_turn'] = 'Combat Phase Open'
+
+            # ── NEW: Dynamic File Path Evolution Logic ──
+            current_turn = queue_entry.get('round', 1)
+            current_phase = queue_entry.get('phase', 1)
+            combat_filename = f"T{current_turn}P{current_phase}C.txt"
+            
+            # Switch the destination from the old movement path to the new combat file path
+            save_destination = os.path.join(game_dir, combat_filename)
+            print(f"[ENGINE SHIFT] Phase complete. Elevating track to: {combat_filename}")
+
         else:
             queue_entry['complete'] = False
             queue_entry['current_system_subphase'] = 'Movement'
@@ -1748,7 +1856,9 @@ def handle_game_confirm_move():
             if entry.get('MovementQueue') == 'MovementQueue':
                 file_data[idx] = queue_entry
                 break
-        write_game_file(filepath, file_data) #let's only write the file once
+        # ── FIXED: Write using our dynamic save_destination tracking pointer ──
+        write_game_file(save_destination, file_data)
+
         return jsonify({'message': f'{username} moved: {maneuver}',
                         'queue': queue_entry,
                         'move_record': move_record,
@@ -1798,53 +1908,6 @@ def get_speed_table():
             f'{k[0]}-{k[1]}': v for k, v in CONTROL_TABLE.items()
         }
     }), 200
-
-def get_movement_queue2(game_id):
-    """
-    Return the current MovementQueue entry from the most recent
-    movement phase file for this game.
-    """
-    try:
-        game = db.get_game(game_id)
-        if not game:
-            return jsonify({'error': 'Game not found'}), 404
-
-        # List and sort game files to find the most recent movement phase
-        all_files  = os.listdir(GAME_FOLDER)
-        game_files = sorted(
-            [f for f in all_files if f.startswith(game_id)],
-            key=lambda f: (
-                # Sort by turn then phase order
-                int(re.search(r'T(\d+)', f).group(1))
-                if re.search(r'T(\d+)', f) else 0
-            )
-        )
-
-        # Find the most recent movement phase file
-        movement_file = None
-        for f in reversed(game_files):
-            if re.search(r'T\d+P[1-5]M\.txt$', f, re.IGNORECASE):
-                movement_file = f
-                break
-
-        if not movement_file:
-            return jsonify({'error': 'No movement phase file found'}), 404
-
-        filepath = os.path.join(GAME_FOLDER, movement_file)
-        data     = read_game_file(filepath)
-
-        for entry in data:
-            if entry.get('MovementQueue') == 'MovementQueue':
-                return jsonify({
-                    'queue':    entry,
-                    'filename': movement_file
-                }), 200
-
-        return jsonify({'error': 'No movement queue found in file'}), 404
-
-    except Exception as e:
-        print(f'Error getting movement queue: {e}')
-        return jsonify({'error': 'Failed to get movement queue'}), 500
 
 @app.route('/get_movement_queue/<game_id>', methods=['GET'])
 @login_required

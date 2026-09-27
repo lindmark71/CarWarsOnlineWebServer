@@ -234,6 +234,27 @@ class GameEngine:
                         print(f'Skipping unparseable line: {e}')
         except Exception as e:
             print(f'Error reading file: {e}')
+
+        for record in result:
+            # Check if the dictionary node represents a permanent car token instance
+            if record.get('CarPosition') == 'CarPosition':
+                if 'local_starting_x_qty' in record:
+                    record['local_starting_x_qty'] = float(record['local_starting_x_qty'])
+                if 'local_starting_y_qty' in record:
+                    record['local_starting_y_qty'] = float(record['local_starting_y_qty'])
+                if 'orientation' in record:
+                    record['orientation'] = int(round(float(record['orientation'])))
+                if 'heading' in record:
+                    record['heading'] = int(round(float(record['heading'])))
+                
+            # Also clean up the movement queue tracker if matching entries are found
+            elif record.get('MovementQueue') == 'MovementQueue':
+                for player in record.get('players', []):
+                    if 'remaining' in player:
+                        player['remaining'] = float(player['remaining'])
+                    if 'half_remaining' in player:
+                        player['half_remaining'] = float(player['half_remaining'])
+
         return result
 
     @staticmethod
@@ -359,7 +380,7 @@ class GameEngine:
         
         # 3. Extract the active player's baseline car position entry using space-agnostic matching
         car_node = None
-        for r in file_data:
+        for r in reversed(file_data):
             if isinstance(r, dict):
                 norm_r = {str(k).replace(' ', ''): v for k, v in r.items()}
                 if norm_r.get('CarPosition') == 'CarPosition' and norm_r.get('owner') == username:
@@ -391,10 +412,24 @@ class GameEngine:
             severity = int(maneuver[1:-1]) if re.search(r'\d+', maneuver) else 1
             direction = maneuver[-1]
             delta = severity * 15
+            
+            # 1. Calculate final facing orientation for the file metadata
             final_angle = (current_angle - delta if direction == 'L' else current_angle + delta) % 360
-            rad = math.radians(final_angle)
-            final_x = current_x + (math.sin(rad) * CAR_LENGTH)
-            final_y = current_y + (-math.cos(rad) * CAR_LENGTH)
+            
+            # 2. FIX: Project the physical distance forward using the STARTING angle vector
+            # (Matches 'STR' physics layout to keep spatial centers locked on grid intersections)
+            start_rad = math.radians(current_angle)
+            final_x = current_x + (math.sin(start_rad) * CAR_LENGTH)
+            final_y = current_y + (-math.cos(start_rad) * CAR_LENGTH)
+            
+            # Note: Make sure your ghost node dictionary records final_angle as its 'orientation'!            
+            #severity = int(maneuver[1:-1]) if re.search(r'\d+', maneuver) else 1
+            #direction = maneuver[-1]
+            #delta = severity * 15
+            #final_angle = (current_angle - delta if direction == 'L' else current_angle + delta) % 360
+            #rad = math.radians(final_angle)
+            #final_x = current_x + (math.sin(rad) * CAR_LENGTH)
+            #final_y = current_y + (-math.cos(rad) * CAR_LENGTH)
         else:
             final_x, final_y = current_x, current_y
         

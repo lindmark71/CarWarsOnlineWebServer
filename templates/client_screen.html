@@ -690,8 +690,7 @@
         <button class="app-btn" id="ID_D4R"  onclick="clickD4R()">D4 Bend Right</button>
         <button class="app-btn" id="ID_D5R"  onclick="clickD5R()">D5 Bend Right</button>
         <button class="app-btn" id="ID_D6R"  onclick="clickD6R()">D6 Bend Right</button>
-        <button class="app-btn" id="ID_FIRE" onclick="clickFire()"
-                style="margin-left:20px;">Firing Action</button>
+        <button class="app-btn" id="ID_FIRE" onclick="clickFire()"style="margin-left:20px;">Firing Action</button>
         <!-- NEW: Confirm Button anchored completely to the right edge -->
         <button class="app-btn" id="ID_CONFIRM" onclick="clickConfirm(event)" 
                 style="background-color: #28a745; margin-left: auto;">Confirm Action</button>
@@ -1281,45 +1280,81 @@
         resizeCanvas();
         
         function drawMap() {
+            // 1. Completely clear the viewport frame
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            // ── 🧪 CRITICAL DIAGNOSTIC ANCHOR ──
-            console.log("[DIAGNOSTIC] drawMap fired. mapState.image status:", !!mapState.image, "Ghost variable state:", typeof currentManeuverGhost !== 'undefined' ? currentManeuverGhost : "UNDEFINED GLOBAL");
-
+            
+            // ── 🧪 DETAILED DIAGNOSTIC ANCHOR ──
+            console.log("[DIAGNOSTIC] drawMap triggered. Map loaded:", !!mapState.image, 
+                        "Ghost loaded:", typeof currentManeuverGhost !== 'undefined' ? !!currentManeuverGhost : "UNDEFINED GLOBAL");
+        
+            // Stop execution early if the main map asset hasn't finished loading yet
             if (!mapState.image) return;
         
             ctx.save();
+        
+            // 2. VIEWPORT MASTER LAYER: Handle all panning and zooming matrix steps safely
             ctx.translate(mapState.panX, mapState.panY);
             ctx.scale(mapState.zoom, mapState.zoom);
+            
+            // Paint the server-rasterized game map sheet 
             ctx.drawImage(mapState.image, 0, 0);
         
-            // ── RESTORED: Clean, Frame-Safe Synchronous RAM Ghost Drawing Loop ──
-            if (currentManeuverGhost && currentManeuverGhost.imageElement) {
+            // 3. ── 🧪 SAFE DIAGNOSTIC VISUAL ANCHOR ──
+            // This safely loops through whatever entries are inside the client memory array
+            // to drop a neon dot on exactly what coordinate coordinates the browser reads.
+            if (typeof file_data !== 'undefined' && Array.isArray(file_data)) {
+                file_data.forEach((entry, i) => {
+                    if (entry && (entry.CarPosition === 'CarPosition' || (entry.get && entry.get('CarPosition') === 'CarPosition'))) {
+                        
+                        // Safely harvest coordinates whether they are raw properties or mapped entries
+                        const rawX = entry.local_starting_x_qty || (entry.get ? entry.get('local_starting_x_qty') : null);
+                        const rawY = entry.local_starting_y_qty || (entry.get ? entry.get('local_starting_y_qty') : null);
+                        
+                        if (rawX !== null && rawY !== null) {
+                            ctx.save();
+                            
+                            // Convert game units/inches directly to canvas pixel space
+                            const dx = Number(rawX) * 40; 
+                            const dy = Number(rawY) * 40;
+                            
+                            ctx.translate(dx, dy);
+                            
+                            // Draw a highly visible neon pink circle exactly at the coordinate location
+                            ctx.beginPath();
+                            ctx.arc(0, 0, 8, 0, 2 * Math.PI);
+                            ctx.fillStyle = "#ff0055";
+                            ctx.fill();
+                            
+                            // Add a tiny text label identifying the entry index
+                            ctx.fillStyle = "#ffffff";
+                            ctx.font = "bold 10px Arial";
+                            ctx.fillText("Car " + i, 12, 4);
+                            
+                            ctx.restore();
+                            console.log(`[DOT PLACED] Placed tracking node index ${i} at: (${rawX}, ${rawY})`);
+                        }
+                    }
+                });
+            }
+        
+            // 4. DYNAMIC GHOST PREVIEW ENGINE MATRIX
+            if (typeof currentManeuverGhost !== 'undefined' && currentManeuverGhost && currentManeuverGhost.imageElement) {
                 const img = currentManeuverGhost.imageElement;
                 
-                // ── 🧪 ADD THESE DIAGNOSTIC LOGS HERE ──
-                console.log("[GHOST CHECK] Object found! Coordinates:", currentManeuverGhost.x, currentManeuverGhost.y);
-                console.log("[GHOST CHECK] Image state - Complete:", img.complete, "Width:", img.naturalWidth, "Source URL:", img.src);
-
-                // Only paint if the preloaded image container asset is fully ready in browser memory
                 if (img.complete && img.naturalWidth !== 0) {
                     ctx.save();
         
-                    // Convert game units/inches directly to canvas pixel dimensions (40px factor)
                     const gx = currentManeuverGhost.x * 40;
                     const gy = currentManeuverGhost.y * 40;
-                    console.log("[GHOST CHECK] Canvas painting coordinates calculated:", gx, gy);
-
                     const angleRad = (currentManeuverGhost.orientation * Math.PI) / 180;
         
-                    // Shift and pivot the drawing origin frame directly over the target grid
                     ctx.translate(gx, gy);
                     ctx.rotate(angleRad);
         
-                    // Enforce your exact tactical 50% transparency opacity mask rules smoothly
-                    ctx.globalAlpha = 0.50;
+                    ctx.globalAlpha = 0.50; // 50% opacity mask rules for temporary preview
         
-                    // Stamp down the car asset using official bounding box metrics: 21x41 pixels
-                    ctx.drawImage(img, -21 / 2, -41 / 2, 21, 41);
+                    // Pivot the ghost chassis asset entirely from its rear axle center line
+                    ctx.drawImage(img, -21 / 2, -41, 21, 41);
         
                     ctx.restore();
                 }
@@ -1327,6 +1362,64 @@
         
             ctx.restore();
         }
+
+
+//        function drawMap() {
+//            ctx.clearRect(0, 0, canvas.width, canvas.height);
+//            // ── 🧪 CRITICAL DIAGNOSTIC ANCHOR ──
+//            console.log("[DIAGNOSTIC] drawMap fired. mapState.image status:", !!mapState.image, "Ghost variable state:", typeof currentManeuverGhost !== 'undefined' ? currentManeuverGhost : "UNDEFINED GLOBAL");
+//
+//            if (!mapState.image) return;
+//        
+//            ctx.save();
+//
+//            // 1. Convert game ledger unit metrics to exact canvas pixel locations
+//            const cx = car.local_starting_x_qty * GAME_LENGTH_PX; // 40px scale factor
+//            const cy = car.local_starting_y_qty * GAME_LENGTH_PX;            
+//
+//            //ctx.translate(mapState.panX, mapState.panY);
+//            // 2. Pivot the drawing origin framework directly over the calculated center point coordinates
+//            ctx.translate(cx, cy);
+//
+//            ctx.scale(mapState.zoom, mapState.zoom);
+//            ctx.drawImage(mapState.image, 0, 0);
+//
+//
+//            // ── RESTORED: Clean, Frame-Safe Synchronous RAM Ghost Drawing Loop ──
+//            if (currentManeuverGhost && currentManeuverGhost.imageElement) {
+//                const img = currentManeuverGhost.imageElement;
+//                
+//                // ── 🧪 ADD THESE DIAGNOSTIC LOGS HERE ──
+//                console.log("[GHOST CHECK] Object found! Coordinates:", currentManeuverGhost.x, currentManeuverGhost.y);
+//                console.log("[GHOST CHECK] Image state - Complete:", img.complete, "Width:", img.naturalWidth, "Source URL:", img.src);
+//
+//                // Only paint if the preloaded image container asset is fully ready in browser memory
+//                if (img.complete && img.naturalWidth !== 0) {
+//                    ctx.save();
+//        
+//                    // Convert game units/inches directly to canvas pixel dimensions (40px factor)
+//                    const gx = currentManeuverGhost.x * 40;
+//                    const gy = currentManeuverGhost.y * 40;
+//                    console.log("[GHOST CHECK] Canvas painting coordinates calculated:", gx, gy);/
+//
+//                    const angleRad = (currentManeuverGhost.orientation * Math.PI) / 180;
+//        
+//                    // Shift and pivot the drawing origin frame directly over the target grid
+//                    ctx.translate(gx, gy);
+//                    ctx.rotate(angleRad);
+//        
+//                    // Enforce your exact tactical 50% transparency opacity mask rules smoothly
+//                    ctx.globalAlpha = 0.50;
+//        
+//                    // Stamp down the car asset using official bounding box metrics: 21x41 pixels
+//                    ctx.drawImage(img, -21 / 2, -41 / 2, 21, 41);
+//        
+//                    ctx.restore();
+//                }
+//            }
+//        
+//            ctx.restore();
+//        }
 
         function showMapPreview(filename, forceReload = false, gameId = null) {
             if (!filename) { clearMap(); return; }
@@ -2686,15 +2779,19 @@
         // client_screen.html (Interface Controls Synchronization Update)
 
         function togglePhaseControls(currentSubphase, currentActivePlayer) {
+            console.lot(" Beginning of togglePhaseControl")
             // Safely look up the username element
             const userElement = document.getElementById('current-username') || document.getElementById('topBarUsername');
             const currentUsername = userElement ? userElement.innerText.trim() : currentUser;
             const isMyTurn = (currentActivePlayer === currentUsername);
+            console.lot("  Value of isMyTurn: ", isMyTurn)
+
 
             // Select the correct control container element IDs
             const movementButtonContainer = document.getElementById('movement-controls-panel');
             const firingActionButton = document.getElementById('ID_FIRE'); // ✅ Fixed ID from 'firing-action-btn' to true HTML id 'ID_FIRE'
 
+            console.lot("   Value of firingActionButton.disabled: ", currentSubphase)
             if (currentSubphase === 'Combat') {
                 // --- WE ARE IN THE COMBAT SUBPHASE ---
                 if (movementButtonContainer) {
@@ -2704,6 +2801,7 @@
 
                 if (firingActionButton) { // ✅ Added critical safety check wrapper
                     firingActionButton.disabled = !isMyTurn;
+                    console.lot("    Value of firingActionButton.disabled: ", firingActionButton.disabled)
                     firingActionButton.style.opacity = isMyTurn ? '1.0' : '0.5';
                 }
             } else {
@@ -2715,9 +2813,11 @@
 
                 if (firingActionButton) { // ✅ Added critical safety check wrapper
                     firingActionButton.disabled = true;
+                    console.lot("    Value of firingActionButton.disabled: ", firingActionButton.disabled)
                     firingActionButton.style.opacity = '0.5';
                 }
             }
+            console.lot(" Ending of togglePhaseControl")
         }
 
 // ── Movement Management ───────────────────────────────────────────

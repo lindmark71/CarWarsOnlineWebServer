@@ -489,3 +489,59 @@ def delete_starting_position_image(name: str):
         conn.commit()
     finally:
         conn.close()
+
+# ── Dropped Images ────────────────────────────────────────────────────────────────
+
+def register_dropped_image(name, owner, base64_data, is_private=False):
+    """
+    Store a dropped image as a base64 string in the database.
+    name is the primary key — must be unique across all users.
+    Returns True on success, False if name already exists.
+    """
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            'SELECT 1 FROM dropped_images WHERE name = ?', (name,)
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute('''
+            INSERT INTO dropped_images (name, base64_data, uploaded_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (name, base64_data, 1 if is_private else 0,
+              datetime.now().isoformat()))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+def get_all_dropped_images():
+    """Return all public dropped images."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            'SELECT name, uploaded_at FROM dropped_images '
+            'WHERE is_private = 0 ORDER BY name'
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def get_dropped_image_by_name(name):
+    """Return the full dropped image record including base64_data."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT * FROM dropped_images WHERE name = ?', (name,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+def delete_dropped_image(name):
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM dropped_images WHERE name = ?', (name,))
+        conn.commit()
+    finally:
+        conn.close()

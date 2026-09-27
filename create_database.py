@@ -92,6 +92,15 @@ def create_database():
             uploaded_at TEXT NOT NULL
         )
     ''')
+    
+    # ── Dropped Images table ──────────────────────────────────────────────────
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS dropped_images (
+            name        TEXT PRIMARY KEY,
+            base64_data TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL
+        )
+    ''')    
 
     conn.commit()
     conn.close()
@@ -104,6 +113,7 @@ def create_database():
     print('  - maps')
     print('  - spectators')
     print('  - car_images')
+    print('  - dropped_images')
 
 def purge_database():
     if not os.path.exists(DB_PATH):
@@ -120,6 +130,7 @@ def purge_database():
     cursor.execute('DELETE FROM maps')
     cursor.execute('DELETE FROM car_images')
     cursor.execute('DELETE FROM starting_position_images')
+    cursor.execute('DELETE FROM dropped_images')
 
     conn.commit()
     conn.close()
@@ -133,6 +144,7 @@ def purge_database():
     print('  - maps')
     print('  - car_images')
     print('  - starting_position_images')
+    print('  - dropped_images')
 
 if __name__ == '__main__':
     print('Car Wars Online — Database Utility')
