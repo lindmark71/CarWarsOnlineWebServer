@@ -258,6 +258,7 @@
             <button class="tab-btn"        onclick="switchTab('players')">👤 Players</button>
             <button class="tab-btn"        onclick="switchTab('designs')">🚗 Designs</button>
             <button class="tab-btn"        onclick="switchTab('maps')">🗺 Maps</button>
+            <button class="tab-btn" onclick="switchTab('dropped_images')">💧 Dropped Images</button>
         </div>
 
         <!-- Games Tab -->
@@ -291,6 +292,14 @@
             </div>
             <div id="maps-content"><div class="loading">Loading...</div></div>
         </div>
+        <!-- Dropped Images Tab -->
+        <div class="tab-panel" id="tab-dropped_images">
+            <div class="section-header">
+                <h2>Dropped Images</h2>
+            </div>
+        <div id="dropped_images-content"><div class="loading">Loading...</div></div>
+        </div>
+
 
     </div>
 
@@ -331,6 +340,7 @@
                 case 'players': loadPlayers(); break;
                 case 'designs': loadDesigns(); break;
                 case 'maps':    loadMaps();    break;
+                case 'dropped_images': loadDroppedImages(); break;
             }
         }
 
@@ -676,6 +686,71 @@
             );
         }
 
+        // ── Dropped Images Fetching & UI Rendering ────────────────────────
+// ── Fixed Dropped Images Fetching Function (No Template Literals) ──────────────────
+        async function loadDroppedImages() {
+          const el = document.getElementById('dropped_images-content');
+          el.innerHTML = '<div class="loading">Loading...</div>';
+          try {
+            const res = await fetch('/admin/dropped-images');
+            const images = await res.json();
+        
+            if (!images.length) {
+              el.innerHTML = '<div class="empty-state">No dropped images found.</div>';
+              return;
+            }
+        
+            // Build table structure
+            let tableHtml = `
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>`;
+        
+            // Loop through using standard string concatenation to completely avoid Jinja conflicts
+            images.forEach(function(img) {
+              const base64Data = img.base64_data || '';
+              
+              tableHtml += '<tr>';
+              // Render the image directly using the base64 string from the database
+              tableHtml += '  <td><img src="data:image/bmp;base64,' + base64Data + '" style="max-height:40px; max-width:60px; object-fit:contain; background:#eee; border-radius:4px;"/></td>';
+              tableHtml += '  <td><strong>' + img.name + '</strong></td>';
+              tableHtml += '  <td>';
+              tableHtml += '    <button class="btn btn-danger btn-sm" onclick="deleteDroppedImage(\'' + encodeURIComponent(img.name) + '\')">Delete</button>';
+              tableHtml += '  </td>';
+              tableHtml += '</tr>';
+            });
+        
+            tableHtml += `
+                </tbody>
+              </table>`;
+        
+            el.innerHTML = tableHtml;
+          } catch (e) { 
+            el.innerHTML = '<div class="empty-state">Error loading dropped images: ' + e.message + '</div>'; 
+          }
+        }
+
+        // ── Dropped Images Deletion Trigger ───────────────────────────────
+        function deleteDroppedImage(name) {
+          showConfirm('Delete Dropped Image', `Delete dropped image "${name}"?`, async () => {
+            try {
+              const res = await fetch(`/admin/dropped-images/${encodeURIComponent(name)}`, { method: 'DELETE' });
+              if (res.ok) { 
+                showToast('Dropped image deleted'); 
+                loadDroppedImages(); 
+              } else { 
+                showToast('Failed to delete image', 'error'); 
+              }
+            } catch (e) { 
+              showToast('Network error', 'error'); 
+            }
+          });
+        }
         // ── Initialise ────────────────────────────────────────────────────
         loadGames();
     </script>

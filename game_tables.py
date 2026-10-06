@@ -1,4 +1,6 @@
 import random
+import os
+import glob
 
 # game_tables.py
 # Speed Control Table
@@ -95,35 +97,35 @@ CONTROL_COLUMNS = [7, 6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5, -6]
 
 CONTROL_TABLE = {
     (  5,  10): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2   ], 'modifier': -3},
-    ( 15,  20): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,    3   ], 'modifier': -2},
-    ( 25,  30): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,    4   ], 'modifier': -1},
-    ( 35,  40): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,    3,    4   ], 'modifier':  0},
-    ( 45,  50): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,    3,    4,    5   ], 'modifier': +1},
-    ( 55,  60): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe',2,    3,    4,    4,    5   ], 'modifier': +1},
-    ( 65,  70): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe',2,    3,    4,    5,    6   ], 'modifier': +2},
-    ( 75,  80): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe',3,    4,    5,    5,    6   ], 'modifier': +2},
-    ( 85,  90): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe',2,    3,    5,    5,    6,    'XX'], 'modifier': +2},
-    ( 95, 100): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe',2,    4,    5,    6,    6,    'XX'], 'modifier': +3},
-    (105, 110): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe',3,    4,    6,    6,    'XX', 'XX'], 'modifier': +3},
-    (115, 120): {'results': ['safe','safe','safe','safe','safe','safe','safe',2,    3,    5,    6,    'XX', 'XX', 'XX'], 'modifier': +3},
-    (125, 130): {'results': ['safe','safe','safe','safe','safe','safe','safe',2,    4,    5,    6,    'XX', 'XX', 'XX'], 'modifier': +4},
-    (135, 140): {'results': ['safe','safe','safe','safe','safe','safe','safe',3,    4,    6,    'XX', 'XX', 'XX', 'XX'], 'modifier': +4},
-    (145, 150): {'results': ['safe','safe','safe','safe','safe','safe',2,    3,    5,    6,    'XX', 'XX', 'XX', 'XX'], 'modifier': +4},
-    (155, 160): {'results': ['safe','safe','safe','safe','safe','safe',2,    4,    5,    6,    'XX', 'XX', 'XX', 'XX'], 'modifier': +5},
-    (165, 170): {'results': ['safe','safe','safe','safe','safe','safe',3,    4,    6,    'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +5},
-    (175, 180): {'results': ['safe','safe','safe','safe','safe',2,    3,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +5},
-    (185, 190): {'results': ['safe','safe','safe','safe','safe',2,    4,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +6},
-    (195, 200): {'results': ['safe','safe','safe','safe','safe',3,    4,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +6},
-    (205, 210): {'results': ['safe','safe','safe','safe',2,    3,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +6},
-    (215, 220): {'results': ['safe','safe','safe','safe',2,    4,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +7},
-    (225, 230): {'results': ['safe','safe','safe','safe',3,    4,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +7},
-    (235, 240): {'results': ['safe','safe','safe',2,    3,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +7},
-    (245, 250): {'results': ['safe','safe','safe',2,    4,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +8},
-    (255, 260): {'results': ['safe','safe',2,    3,    4,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +8},
-    (265, 270): {'results': ['safe','safe',2,    3,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +8},
-    (275, 280): {'results': ['safe',2,    3,    4,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +9},
-    (285, 290): {'results': ['safe',2,    3,    4,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +9},
-    (295, 300): {'results': ['safe',3,    4,    5,    6,    'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX', 'XX'], 'modifier': +9},
+    ( 15,  20): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,     3   ], 'modifier': -2},
+    ( 25,  30): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,     4   ], 'modifier': -1},
+    ( 35,  40): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,     3,     4   ], 'modifier':  0},
+    ( 45,  50): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe','safe',2,     3,     4,     5   ], 'modifier': +1},
+    ( 55,  60): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe',2,     3,     4,     4,     5   ], 'modifier': +1},
+    ( 65,  70): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe',2,     3,     4,     5,     6   ], 'modifier': +2},
+    ( 75,  80): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe','safe',3,     4,     5,     5,     6   ], 'modifier': +2},
+    ( 85,  90): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe',2,     3,     5,     5,     6,     'XX'], 'modifier': +2},
+    ( 95, 100): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe',2,     4,     5,     6,     6,     'XX'], 'modifier': +3},
+    (105, 110): {'results': ['safe','safe','safe','safe','safe','safe','safe','safe',3,     4,     6,     6,     'XX',  'XX'], 'modifier': +3},
+    (115, 120): {'results': ['safe','safe','safe','safe','safe','safe','safe',2,     3,     5,     6,     'XX',  'XX',  'XX'], 'modifier': +3},
+    (125, 130): {'results': ['safe','safe','safe','safe','safe','safe','safe',2,     4,     5,     6,     'XX',  'XX',  'XX'], 'modifier': +4},
+    (135, 140): {'results': ['safe','safe','safe','safe','safe','safe','safe',3,     4,     6,     'XX',  'XX',  'XX',  'XX'], 'modifier': +4},
+    (145, 150): {'results': ['safe','safe','safe','safe','safe','safe',2,     3,     5,     6,     'XX',  'XX',  'XX',  'XX'], 'modifier': +4},
+    (155, 160): {'results': ['safe','safe','safe','safe','safe','safe',2,     4,     5,     6,     'XX',  'XX',  'XX',  'XX'], 'modifier': +5},
+    (165, 170): {'results': ['safe','safe','safe','safe','safe','safe',3,     4,     6,     'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +5},
+    (175, 180): {'results': ['safe','safe','safe','safe','safe',2,     3,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +5},
+    (185, 190): {'results': ['safe','safe','safe','safe','safe',2,     4,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +6},
+    (195, 200): {'results': ['safe','safe','safe','safe','safe',3,     4,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +6},
+    (205, 210): {'results': ['safe','safe','safe','safe',2,     3,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +6},
+    (215, 220): {'results': ['safe','safe','safe','safe',2,     4,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +7},
+    (225, 230): {'results': ['safe','safe','safe','safe',3,     4,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +7},
+    (235, 240): {'results': ['safe','safe','safe',2,     3,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +7},
+    (245, 250): {'results': ['safe','safe','safe',2,     4,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +8},
+    (255, 260): {'results': ['safe','safe',2,     3,     4,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +8},
+    (265, 270): {'results': ['safe','safe',2,     3,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +8},
+    (275, 280): {'results': ['safe',2,     3,     4,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +9},
+    (285, 290): {'results': ['safe',2,     3,     4,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +9},
+    (295, 300): {'results': ['safe',3,     4,     5,     6,     'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX',  'XX'], 'modifier': +9},
 }
 
 def get_control_row(speed: int) -> dict:
@@ -298,6 +300,34 @@ def build_movement_queue(players: list, phase: int) -> dict:
         'turn_count': 1
     }
 
+def build_combat_queue(players: list, game_dir_path: str) -> dict:
+    """
+    Build the compact combat queue structure for a phase.
+    players: list of dicts, each with 'username', 'self.crew_title*_used', 'self.selected_sub_weapon_*_canvas_used
+    Returns a MovementQueue dict ready to be written to the phase file.
+    """
+    # Speeds where the only movement in any phase that yields 0.5
+    # is a forced straight with no maneuver and no order choice
+    
+    queue_players = []
+    for index, p in enumerate(players):
+        username = p['username']
+        crew_weapons_list = extract_crew_and_weapons(index + 1, game_dir_path)
+        
+        queue_players.append({
+            'username': username,
+            'crew_weapons_list': crew_weapons_list,
+        })
+        
+    
+    # Seeds the subphase and initiative trackers directly into the core object payload
+    return {
+        'CombatQueue': 'CombatQueue',
+        'players': queue_players,
+        'round': 1,
+        'complete': False,
+    }
+
 def get_current_mover(queue: dict) -> dict | None:
     """
     Return the player entry whose turn it currently is,
@@ -351,3 +381,51 @@ def process_end_of_turn_hc_recovery(car_record: dict) -> None:
     except Exception as e:
         print(f"[EOT RECOVERY ERROR] Failed to compute handling recovery math: {e}")
 
+def extract_crew_and_weapons(player_number: int, game_dir_path: str) -> dict:
+    """Given a player number, find the vehicle design in the game directory and extract
+       the crew and list of all weapons"""
+    matching_files = glob.glob(os.path.join(game_dir_path, f"player_{player_number}_*.txt"))
+    filepath = matching_files[0]
+    return_dict: dict = {}
+
+    if not os.path.exists(filepath):
+        print(f'Phase file not found: {filepath}')
+        return return_dict
+
+    with open(filepath) as opened_file:
+        data = opened_file.readlines() #a car file is a single line of dictionary elements
+    #data is a python list with one element.  We need to convert it to a dictionary
+    cleaned_data =  data[0].strip().lstrip('[').rstrip(']').lstrip('{').rstrip('}')
+    pairs = cleaned_data.split(',')
+    design_dict: dict = {}
+    for pair in pairs:
+        key, value = pair.split(':')
+        clean_key = key.strip().strip("'\"")
+        clean_value = value.strip().strip("'\"")
+        design_dict[clean_key] = clean_value
+
+    #'self.crew_title_0': 'Driver', 
+    #'self.selected_sub_weapon_0_canvas': 'Minedropper',
+
+    crew_index = 0
+    weapon_index = 0
+    find_me_crew = f'self.crew_title_{crew_index}'
+    find_me_weapon = f'self.selected_sub_weapon_{weapon_index}_canvas'
+    while True:
+        if find_me_crew in design_dict:
+            crew_name = design_dict[find_me_crew]
+            return_dict[crew_name] = False
+            crew_index = crew_index + 1
+            find_me_crew = f'self.crew_title_{crew_index}'
+        else:
+            break
+    while True:
+        if find_me_weapon in design_dict:
+            weapon_name = design_dict[find_me_weapon]
+            return_dict[weapon_name] = False
+            weapon_index = weapon_index + 1
+            find_me_weapon = f'self.selected_sub_weapon_{weapon_index}_canvas'
+        else:
+            break
+
+    return return_dict

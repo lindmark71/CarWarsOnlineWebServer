@@ -1,6 +1,8 @@
 import os
 import ast
 import math
+import json
+import shutil
 import re
 from datetime import datetime
 import inflect
@@ -717,3 +719,124 @@ class GameEngine:
             return False
         fixed_facings = facings - {"Top"}
         return len(fixed_facings) <= 1
+
+    @staticmethod
+    def process_player_combat(game_id, username):
+        """
+        Marks a player's combat/firing action complete, updates the phase file,
+        and triggers a phase progression check if everyone is done.
+        """
+        # 1. Establish your absolute workspace paths (adjust to match your app structure)
+        GAME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games', str(game_id))
+        
+        if not os.path.exists(GAME_DIR):
+            print(f"[ENGINE ERROR] Game directory not found at: {GAME_DIR}")
+            return False
+
+        # 2. Grab all txt files matching your pattern to find the current active file
+        all_files = os.listdir(GAME_DIR)
+        game_files = sorted(
+            [f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')],
+            key=lambda f: os.path.getmtime(os.path.join(GAME_DIR, f))
+        )
+
+        if not game_files:
+            print(f"[ENGINE ERROR] No active state tracking files found in {GAME_DIR}")
+            return False
+
+        # Target the absolute latest file by timestamp (e.g., 'T1P1C.txt')
+        current_filename = game_files[-1]
+        current_filepath = os.path.join(GAME_DIR, current_filename)
+
+        # 3. Read and parse the current active state data payload
+        try:
+            with open(current_filepath, 'r') as file:
+                game_state_data = json.load(file)
+        except Exception as e:
+            print(f"[ENGINE ERROR] Failed reading state file {current_filename}: {e}")
+            return False
+
+        # 4. Mark the user's action flag complete inside the parsed data structure
+        # (Adapting to structural variations: checks direct object or sub-player matrices)
+        player_found = False
+        if 'players' in game_state_data:
+            for player in game_state_data['players']:
+                if player.get('username') == username:
+                    player['firing_action_taken'] = True
+                    player['status'] = 'action_completed'
+                    player_found = True
+                    break
+        
+        # If your file layout lists entries as flat elements in a top-level array:
+        elif isinstance(game_state_data, list):
+            for entry in game_state_data:
+                if entry.get('CarPosition') == 'CarPosition' and entry.get('username') == username:
+                    entry['firing_action_taken'] = True
+                    entry['status'] = 'action_completed'
+                    player_found = True
+                    break
+
+        if not player_found:
+            print(f"[ENGINE WARNING] Player '{username}' not found in state file registry.")
+
+        # 5. Save the updated data registry back to your current active session file
+        try:
+            with open(current_filepath, 'w') as file:
+                json.dump(game_state_data, file, indent=4)
+        except Exception as e:
+            print(f"[ENGINE ERROR] Failed updating file {current_filename}: {e}")
+            return False
+
+        print(f"[ENGINE SUCCESS] Recorded combat deployment flag for {username} in {current_filename}")
+
+        # 6. Check if ALL players are now finished to advance the phase machine
+        return GameEngine.check_and_advance_phase(GAME_DIR, current_filename, game_state_data)
+
+    @staticmethod
+    def check_and_advance_phase(game_dir, current_filename, game_state_data):
+        """
+        Evaluates the active registry to verify if any actions are outstanding.
+        If all are clear, copies 'T1P1C.txt' directly to 'T1P2M.txt' automatically.
+        """
+        # Determine who still needs to move based on your structure
+        players_list = game_state_data.get('players', game_state_data if isinstance(game_state_data, list) else [])
+        
+        # Identify active game items that are still waiting to execute a required action
+        pending_actions = [
+            p for p in players_list 
+            if p.get('CarPosition') == 'CarPosition' or 'username' in p
+            if not p.get('firing_action_taken', False) and p.get('status') != 'action_completed'
+        ]
+
+        # If anyone is still pending, hold back progression execution smoothly
+        if len(pending_actions) > 0:
+            print(f"[PHASE HOLD] Phase cannot advance. {len(pending_actions)} player(s) still deciding.")
+            return True
+
+        # Parsing the current string pattern structure (e.g., 'T1P1C.txt') to compute Phase + 1
+        match = re.match(r'^T(\d+)P(\d+)(C|M)\.txt$', current_filename)
+        if not match:
+            print(f"[PHASE ERROR] Filename format unrecognized for auto-progression parsing: {current_filename}")
+            return False
+
+        turn_num = int(match.group(1))
+        phase_num = int(match.group(2))
+        
+        # Advance phase numbers cleanly (Phase 1 -> Phase 2)
+        next_phase_num = phase_num + 1
+        next_filename = f"T{turn_num}P{next_phase_num}M.txt" # Creates 'T1P2M.txt'
+        
+        src_path = os.path.join(game_dir, current_filename)
+        dest_path = os.path.join(game_dir, next_filename)
+
+        try:
+            # 7. EXECUTE STATE MIGRATION: Duplicate file payload to create the new phase file
+            shutil.copy2(src_path, dest_path)
+            message = f"🚀 [PHASE TRANSITION SUCCESS] Every action taken. Advanced phase cleanly: {current_filename} -> {next_filename}"
+            print(message)           
+            # Optional: Reset player flag states inside the newly initialized phase file if necessary 
+            return True, message
+        except IOError as e:
+            message = f"[FILE LOCK ERROR] Could not clone state mapping definitions to next phase path: {e}"
+            print(message)
+            return False, message

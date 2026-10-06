@@ -8,7 +8,6 @@ from PIL import Image, ImageDraw
 from datetime import datetime
 import sqlite3
 
-
 class MapRenderer:
 
     def __init__(self):
@@ -58,6 +57,27 @@ class MapRenderer:
             conn = sqlite3.connect(db_path)
             row  = conn.execute(
                 'SELECT base64_data FROM car_images WHERE name = ?',
+                (image_name,)
+            ).fetchone()
+            conn.close()
+            if row:
+                decoded = base64.b64decode(row[0])
+                return Image.open(BytesIO(decoded)).convert('RGBA')
+        except Exception as e:
+            print(f'Error loading car image "{image_name}" from DB: {e}')
+        return None
+    
+    def get_dropped_image_from_db(self, image_name: str):
+        """
+        Look up a car image by name from the database.
+        Returns a PIL Image or None if not found.
+        """
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'carwars.db')
+        try:
+            conn = sqlite3.connect(db_path)
+            row  = conn.execute(
+                'SELECT base64_data FROM dropped_images WHERE name = ?',
                 (image_name,)
             ).fetchone()
             conn.close()
@@ -136,7 +156,8 @@ class MapRenderer:
             return
 
         object_list = ['Rect', 'Circle', 'Polygon', 'Text', 'FloorPaint',
-                       'StartingPosition', 'Arc', 'Ramp', 'RaisedPlatform', 'CarPosition', 'ProposedCarPosition']
+                       'StartingPosition', 'Arc', 'Ramp', 'RaisedPlatform', 
+                       'CarPosition', 'ProposedCarPosition', 'DroppedWeaponAsset']
 
         for entry in input_list:
             object_found        = False
@@ -197,56 +218,53 @@ class MapRenderer:
                 self.create_rect(local_x_qty, local_y_qty,
                                  local_z_floor_qty, local_z_ceiling_qty,
                                  local_starting_x, local_starting_y, local_color)
-
             elif object_type == 'Circle':
                 self.create_circle(local_outer_radius, local_inner_radius,
                                    local_begin_degree, local_end_degree,
                                    local_z_floor_qty, local_z_ceiling_qty,
                                    local_starting_x, local_starting_y, local_color)
-
             elif object_type == 'Polygon':
                 self.create_polygon(local_tuples, local_color, expanded=True)
-
             elif object_type == 'Text':
                 self.create_text(local_text, local_color,
                                  local_starting_x, local_starting_y)
-
             elif object_type == 'FloorPaint':
                 self.create_floor_paint(local_color, local_starting_x, local_starting_y)
-
             elif object_type == 'StartingPosition':
                 self.create_starting_position(local_color,
                                               local_starting_x,
                                               local_starting_y,
                                               local_orientation,
                                               int(local_position_num))
-                
-
             elif object_type == 'Arc':
                 self.create_arc(local_radius_qty, local_begin_degree, local_end_degree,
                                 local_z_floor_qty, local_z_ceiling_qty,
                                 local_starting_x, local_starting_y, local_ccw, local_color)
-
             elif object_type == 'Ramp':
                 self.create_ramp(local_x_qty, local_y_qty,
                                  local_z_floor_qty, local_z_ceiling_qty,
                                  local_starting_x, local_starting_y,
                                  local_orientation, local_color)
-
             elif object_type == 'RaisedPlatform':
                 self.create_raised_platform(local_x_qty, local_y_qty,
                                             local_starting_x, local_starting_y,
                                             local_z_floor_qty, local_z_ceiling_qty,
                                             local_color)
             elif object_type == 'CarPosition':
-                self.create_car_position(local_color, local_starting_x,
-                                        local_starting_y, local_orientation,
-                                        entry.get('car_image_name', None), is_ghost=False)
-            elif object_type == 'ProposedCarPosition':
-                self.create_car_position(local_color, local_starting_x,
-                                        local_starting_y, local_orientation,
-                                        entry.get('car_image_name', None), is_ghost=True)
-
+                self.create_car_position(input_color=local_color, 
+                                         input_starting_x_qty=local_starting_x,
+                                         input_starting_y_qty=local_starting_y, 
+                                         input_orientation=local_orientation,
+                                         car_image_name=entry.get('car_image_name', None), 
+                                         is_ghost=False)
+            elif object_type == 'DroppedWeaponAsset':
+                # Ensure line parsing loops harvest entry.get('status') or entry.get('name') if needed
+                self.create_dropped_weapon(
+                        local_starting_x=local_starting_x,
+                        local_starting_y=local_starting_y,
+                        orientiation=local_orientation,
+                        image_name=entry.get('name', 'mines')
+                    )
                 
     # ── Drawing Methods ───────────────────────────────────────────────────────
 
@@ -471,6 +489,63 @@ class MapRenderer:
         if car_image_name:
             entry_dict['car_image_name'] = car_image_name
         self.design_dict_list.append(entry_dict)
+
+    def create_dropped_weapon(self, local_starting_x, local_starting_y, orientiation, image_name: str = 'mines'):
+        """
+        Draw a dropped weapon asset on the map at given coordinates.
+        Attempts to read a sprite from the DB, otherwise falls back to a 
+        high-visibility vector circle.
+        """
+        # 1. Convert structural map grid coordinates to absolute pixel values (40px grid scaling)
+        pixel_x = int(float(local_starting_x) * 40)
+        pixel_y = int(float(local_starting_y) * 40)
+        
+        # 2. Attempt to pull the graphical asset from the SQL database
+        weapon_image = None
+        if image_name:
+            # Check if a custom table lookup method exists, otherwise use standard car image loader as base
+            weapon_image = self.get_dropped_image_from_db(image_name)
+            
+        # 3. Vector Fallback Loop: Execute if asset is missing or unreadable
+        if weapon_image is None:
+            # Create a bounding canvas matching standard 20x20 drop tokens
+            weapon_image = Image.new('RGBA', (20, 20), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(weapon_image)
+            
+            # Draw standard hazard circle: Caution Alert Orange (255, 170, 0)
+            draw.ellipse([0, 0, 19, 19], fill=(255, 170, 0, 255), outline=(0, 0, 0, 255), width=2)
+        
+        # 4. Handle Matrix Rotation (Counter-clockwise rotation match step)
+        try:
+            rot_orientation = float(orientiation)
+        except (ValueError, TypeError):
+            rot_orientation = 0.0
+            
+        weapon_rgba = weapon_image.convert('RGBA')
+        pillow_angle = (360 - rot_orientation) % 360
+        weapon_rotated = weapon_rgba.rotate(pillow_angle, resample=Image.BICUBIC, expand=True)
+        
+        # 5. Math Alignment: Treat local_starting_x/y as the true center of the asset
+        orig_w, orig_h = weapon_rgba.size
+        rot_w, rot_h = weapon_rotated.size
+
+        # Calculate canvas expansion padding
+        expansion_offset_x = (rot_w - orig_w) // 2
+        expansion_offset_y = (rot_h - orig_h) // 2
+
+        # To center it: subtract half unrotated size, then subtract the rotation expansion padding
+        paste_position = (
+            pixel_x - (orig_w // 2) - expansion_offset_x,
+            pixel_y - (orig_h // 2) - expansion_offset_y
+        )
+
+        # 6. Burn directly onto master sheet using the alpha stream mask channel
+        self.current_image.paste(
+            weapon_rotated,
+            paste_position,
+            mask=weapon_rotated.split()[3]
+        )
+
 
     # ── Internal Geometry Helpers ─────────────────────────────────────────────
 

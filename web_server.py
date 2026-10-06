@@ -663,6 +663,37 @@ def admin_delete_map(map_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/admin/dropped-images', methods=['GET'])
+@admin_required
+def admin_list_dropped_images():
+    try:
+        conn = db.get_db()
+        # Retrieves the image primary keys, payload data, and timestamps sorted cleanly
+        rows = conn.execute('SELECT name, base64_data, uploaded_at FROM dropped_images ORDER BY name').fetchall()
+        conn.close()
+        return jsonify([dict(r) for r in rows]), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+import urllib.parse
+
+@app.route('/admin/dropped-images/<path:name>', methods=['DELETE'])
+@admin_required
+def admin_delete_dropped_image(name):
+    try:
+        # Decodes names that have special characters or spaces passed from the frontend
+        decoded_name = urllib.parse.unquote(name)
+        
+        conn = db.get_db()
+        # Executes row deletion directly on your primary key
+        conn.execute('DELETE FROM dropped_images WHERE name = ?', (decoded_name,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'status': 'success', 'message': f'Dropped image {decoded_name} deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ── SMS Routes ────────────────────────────────────────────────────────────────
 
 @app.route('/send_sms_notification', methods=['POST'])
@@ -923,6 +954,7 @@ def join_game():
     game_id = data.get('game_id', '').strip()
     if not game_id:
         return jsonify({'error': 'game_id is required'}), 400
+    design_choice = data.get('design', '').strip()
     driver_selected_speed = int(data.get('starting_speed', 0)) # Default fallback safety
 
     try:
@@ -955,10 +987,24 @@ def join_game():
 
         # Unique index assignment (1-based index)
         position_number = len(players) + 1
-        db.join_game(game_id, session['username'], position_number)
+        db.join_game(game_id, session['username'], design_choice, position_number)
+
+        source_design_path = os.path.join(UPLOAD_FOLDER_DESIGN, design_choice)
+
+        if position_number and os.path.exists(source_design_path):
+            game_dir = game_dir_path(game_id)
+            os.makedirs(game_dir, exist_ok=True)
+
+            snapshot_filename = f"player_{position_number}_{design_choice}"
+            destination_path = os.path.join(game_dir, snapshot_filename)
+
+            try:
+                shutil.copy2(source_design_path, destination_path)
+                print(f"[DESIGN SNAPSHOT] Copied {design_choice} -> {snapshot_filename}")
+            except Exception as copy_err:
+                print(f"[DESIGN SNAPSHOT ERROR] Failed to copy design file: {copy_err}")        
 
         if t1p0_path and car_image_name:
-            design_choice = data.get('design', '').strip()
             # Inject player name along with position number for strict map tracking updates
             success = add_car_position_to_file(
                 filepath=t1p0_path,
@@ -1692,7 +1738,7 @@ def handle_game_confirm_move():
                 # Rigid chassis pixel bounds (21x41 template scale assets)
                 half_w = 10.5
                 half_h = 20.5
-                car_len = 41.0
+                car_len = 40.0
                 
                 # Compute original pixel coordinate centers
                 orig_center_x = orig_x * 40.0 + half_w
@@ -2043,6 +2089,7 @@ def build_and_write_movement_queue(game_id: str, game_name: str, phase: int) -> 
     and write it back.
     """
     from game_tables import build_movement_queue
+    from game_tables import build_combat_queue
 
     filename = f'T{1}P{phase}M.txt'  # always turn 1 for now
     filepath = os.path.join(game_dir_path(game_id), filename)
@@ -2056,13 +2103,15 @@ def build_and_write_movement_queue(game_id: str, game_name: str, phase: int) -> 
         return False
 
     players = []
-    for entry in data:
+    for entry in reversed(data):
         normalized_entry = {str(k).replace(' ', ''): v for k, v in entry.items()}
         if normalized_entry.get('CarPosition') == 'CarPosition':
             players.append({
                 'username': normalized_entry.get('owner', ''),
                 'current_speed': int(normalized_entry.get('current_speed', 0))
             })
+        else: # As this function is called, the CarPosition entries shall be the last entries.  Once we find an entry that isn't a CarPosition, we can afford to stop looking
+            break
 
     if not players:
         print(f'No CarPosition entries found in {filepath}')
@@ -2078,62 +2127,186 @@ def build_and_write_movement_queue(game_id: str, game_name: str, phase: int) -> 
     data = [e for e in data if str(list(e.keys())).replace(' ', '') != 'MovementQueue']
     data.append(queue)
 
+    combat_queue = build_combat_queue(players, game_dir_path(game_id))
+    data.append(combat_queue)
+
     return write_game_file(filepath, data)
 
+def determine_game_subphase(file_list: list) -> str:
+    """
+    Analyzes a list of Car Wars turn files and returns either 'movement' or 'combat'
+    based on the absolute latest chronological turn state.
+    """
+    latest_turn = -1
+    latest_phase = -1
+    latest_subphase = ""  # Will hold 'M', 'C', or '0'
+    
+    # Pattern to match T<numbers>P<numbers><optional letter>
+    pattern = re.compile(r'^T(\d+)P(\d+)([M|C|EOT|E|]?)', re.IGNORECASE)
+    
+    for filename in file_list:
+        match = pattern.match(filename)
+        if not match:
+            continue
+            
+        turn = int(match.group(1))
+        phase = int(match.group(2))
+        subphase = match.group(3).upper() if match.group(3) else '0'
+        
+        # 1. Check if this file belongs to a newer Turn
+        # 2. Or if it's the same Turn, check if it's a newer Phase
+        if (turn > latest_turn) or (turn == latest_turn and phase > latest_phase):
+            latest_turn = turn
+            latest_phase = phase
+            latest_subphase = subphase
+            
+        # 3. If it's the exact same Turn and Phase, Combat ('C') supersedes 
+        #    Movement ('M') or Initialization ('0') for that specific phase block.
+        elif turn == latest_turn and phase == latest_phase:
+            if subphase == 'C':
+                latest_subphase = 'C'
+            elif subphase == 'M' and latest_subphase == '0':
+                latest_subphase = 'M'
+
+    # Return the clean human-readable indicator string
+    if latest_subphase == 'C':
+        return "Combat"
+    else:
+        return "Movement"
+    
 @app.route('/api/game_state/<game_id>')
 def get_game_state(game_id):
     """
     Locates the active match's directory, enforces MapRenderer space-stripping 
     key normalization rules to prevent property mismatches, and updates the UI ticker.
     """
-    try:
-        game_dir = game_dir_path(game_id)
-        if not os.path.isdir(game_dir):
-            return jsonify({"success": False, "error": "Match room data not found."}), 404
+    game_id = str(game_id).strip()
+    username = session.get('username')
+    
+    # 1. Establish your absolute folder framework
+    game_dir = game_dir_path(game_id)
+    if not os.path.exists(game_dir):
+        return jsonify({'success': False, 'error': 'Game session directory not found'}), 404
 
-        game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
+    try:
+        # 2. Gather tracking files sorted chronologically by modification time
+        all_files = os.listdir(game_dir)
+        game_files = sorted(
+            [f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')],
+            key=lambda f: os.path.getmtime(os.path.join(game_dir, f))
+        )
 
         if not game_files:
-            return jsonify({"success": False, "error": "Match room data not found."}), 404
+            return jsonify({'success': False, 'error': 'No tracking state files found'}), 404
 
-        filepath = os.path.join(game_dir, game_files[-1])
-        raw_records = GameEngine.read_game_file(filepath)
+        # Read the absolute latest active game tracking ledger file
+        current_filename = game_files[-1]
+        current_filepath = os.path.join(game_dir, current_filename)
 
-        if not raw_records:
-            return jsonify({"success": False, "error": "Game log database file is empty."}), 500
+        phase_records = GameEngine.read_game_file(current_filepath)
 
-        # Replicate MapRenderer's structural space-stripping rule across records
-        normalized_records = []
-        for entry in raw_records:
-            normalized_entry = {str(k).replace(' ', ''): v for k, v in entry.items()}
-            normalized_records.append(normalized_entry)
+        # 3. STATE MACHINE CLASSIFIER: Determine context based on suffix patterns
+        # Suffix rules: 'M' = Movement Phase, 'C' = Combat Phase
+        is_combat_phase = current_filename.endswith('C.txt')
+        is_movement_phase = current_filename.endswith('M.txt')
 
-        # Isolate the central metadata tracking block using clean keys
-        mq = next((r for r in normalized_records if r.get('MovementQueue') == 'MovementQueue'), {})
+        # 4. ACTIVE COMBAT EVALUATION LAYER
+        if is_combat_phase:
+            # Count how many cars are registered as active participants but haven't acted yet
+            cars_needing_combat_actions = [
+                car for car in phase_records
+                if isinstance(car, dict) and (car.get('CarPosition') == 'CarPosition' or 'username' in car)
+                if not car.get('firing_action_taken', False) and car.get('status') != 'action_completed'
+            ]
+            
+            # 5. ALL PARTICIPANTS ARE FINISHED -> MIGRATE FILE TO NEXT MOVEMENT PHASE
+            if len(cars_needing_combat_actions) == 0:
+                match = re.match(r'^T(\d+)P(\d+)C\.txt$', current_filename)
+                if match:
+                    turn_num = int(match.group(1))
+                    phase_num = int(match.group(2))
+                    
+                    # Compute next sequential sequence markers (e.g., Turn 1 Phase 1 Combat -> Turn 1 Phase 2 Movement)
+                    next_phase_num = phase_num + 1
+                    next_filename = f"T{turn_num}P{next_phase_num}M.txt" # Generates 'T1P2M.txt'
+                    next_filepath = os.path.join(game_dir, next_filename)
 
-        game_name_clean = str(mq.get('game_name', mq.get('gamename', 'Car Wars Arena')))
-        turn_qty = int(float(mq.get('turn_count', mq.get('turncount', 1))))
-        phase_qty = int(float(mq.get('phase', 1)))
-        subphase_mode = str(mq.get('current_system_subphase', mq.get('current_system_subphase', 'Movement')))
-        active_driver = str(mq.get('active_player_turn', mq.get('active_player_turn', 'Player 1')))
-        
+                    # Only duplicate if the next phase record file slot doesn't exist yet
+                    if not os.path.exists(next_filepath):
+                        try:
+                            # Safely duplicate the finished combat file context over to the next movement slot
+                            shutil.copy2(current_filepath, next_filepath)
+                            print(f"🚀 [AUTO PROGRESSION SUCCESS]: All combat finished. Advanced: {current_filename} -> {next_filename}")
+                            
+                            # Switch context pointers to return the newly generated ledger state immediately
+                            current_filename = next_filename
+                            phase_records = GameEngine.read_game_file(next_filepath)
+                                
+                        except IOError as io_err:
+                            print(f"[FILE LOCK EXCEPTION] Could not run file generation cascade: {io_err}")
+
+        # Return the payload securely back to client frontend scripts
         return jsonify({
-            "success": True,
-            "requires_turn_speed_selection": bool(mq.get('requires_turn_speed_selection', False)),
-            "queue": mq, # ── CRITICAL: The full MovementQueue block must be passed up to hydrate budgets!
-            "ticker_data": {
-                "game_name": game_name_clean,
-                "turn": turn_qty,
-                "phase": phase_qty,
-                "mode": subphase_mode,
-                "active_player": active_driver
-            },
-            "cars": [r for r in normalized_records if r.get('CarPosition') == 'CarPosition'],
-            "ghosts": [r for r in normalized_records if r.get('ProposedCarPosition') == 'ProposedCarPosition']
-        })
+            'success': True,
+            'current_file': current_filename,
+            'phase_type': 'combat' if current_filename.endswith('C.txt') else 'movement',
+            'data': phase_records
+        }), 200
 
-    except Exception as route_crash:
-        return jsonify({"success": False, "error": f"Internal pipeline crash: {str(route_crash)}"}), 500
+    except Exception as e:
+        print(f"Error processing automated game state evaluation loop: {e}")
+        return jsonify({'success': False, 'error': 'Internal server loop calculation failure'}), 500
+
+#//    try:
+#//        game_dir = game_dir_path(game_id)
+#//        if not os.path.isdir(game_dir):
+#//            return jsonify({"success": False, "error": "Match room data not found."}), 404
+
+#//        game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
+
+#//        if not game_files:
+#//            return jsonify({"success": False, "error": "Match room data not found."}), 404
+        
+
+#//        filepath = os.path.join(game_dir, game_files[-1])
+#//        raw_records = GameEngine.read_game_file(filepath)
+
+#//        if not raw_records:
+#//            return jsonify({"success": False, "error": "Game log database file is empty."}), 500
+
+#//        # Replicate MapRenderer's structural space-stripping rule across records
+#//        normalized_records = []
+#//        for entry in raw_records:
+#//            normalized_entry = {str(k).replace(' ', ''): v for k, v in entry.items()}
+#//            normalized_records.append(normalized_entry)
+
+#//        # Isolate the central metadata tracking block using clean keys
+#//        mq = next((r for r in normalized_records if r.get('MovementQueue') == 'MovementQueue'), {})
+
+#//        game_name_clean = str(mq.get('game_name', mq.get('gamename', 'Car Wars Arena')))
+#//        turn_qty = int(float(mq.get('turn_count', mq.get('turncount', 1))))
+#//        phase_qty = int(float(mq.get('phase', 1)))
+#//        #subphase_mode = str(mq.get('current_system_subphase', mq.get('current_system_subphase', 'Movement'))) phase_type: str = determine_game_subphase(game_files)
+#//        subphase_mode = determine_game_subphase(game_files)
+#//        active_driver = str(mq.get('active_player_turn', mq.get('active_player_turn', 'Player 1')))
+        
+#//        return jsonify({
+#//            "success": True,
+#//            "requires_turn_speed_selection": bool(mq.get('requires_turn_speed_selection', False)),
+#//            "queue": mq, # ── CRITICAL: The full MovementQueue block must be passed up to hydrate budgets!
+#//            "ticker_data": {
+#//                "game_name": game_name_clean,
+#//                "turn": turn_qty,
+#//                "phase": phase_qty,
+#//                "mode": subphase_mode,
+#//                "active_player": active_driver
+#//            },
+#//            "cars": [r for r in normalized_records if r.get('CarPosition') == 'CarPosition'],
+#//            "ghosts": [r for r in normalized_records if r.get('ProposedCarPosition') == 'ProposedCarPosition']
+#//        })
+#//
+#//    except Exception as route_crash:
+#//        return jsonify({"success": False, "error": f"Internal pipeline crash: {str(route_crash)}"}), 500
 
 @app.route('/api/end_combat_subphase', methods=['POST'])
 def end_combat_subphase():
@@ -2326,7 +2499,7 @@ def render_game_file(game_id, filename):
                     # Core dimensions in pixels (matching 21x41 sprite grid assets)
                     half_w = 10.5
                     half_h = 20.5
-                    car_len = 41.0
+                    car_len = 40.0
                     
                     # Compute center location of base vehicle asset box in pixel units
                     orig_center_x = orig_x * 40.0 + half_w
@@ -2459,23 +2632,44 @@ def get_firing_dialog_data():
 
         car_record = car_records[0]
 
+        # ── NEW: READ CURRENT GAME FILE EARLY FOR DROPPED WEAPON VALIDATION ──
+        game_dir = game_dir_path(game_id)
+        # Using sorted with getmtime ensures we evaluate the current chronological phase file
+        game_files = sorted(
+            [f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')],
+            key=lambda f: os.path.getmtime(os.path.join(game_dir, f))
+        )
+        if not game_files:
+            return jsonify({'error': 'No active game state file found'}), 404
+
+        phase_filepath = os.path.join(game_dir, game_files[-1])
+        phase_records = GameEngine.read_game_file(phase_filepath)
+
+        # Scan phase records to see if this user has already dropped a weapon asset this phase
+        has_dropped_weapon_this_phase = any(
+            r.get('DroppedWeaponAsset') == 'DroppedWeaponAsset' and r.get('deployed_by') == username
+            for r in phase_records
+        )
+
         # 2. Crew members, with used/available status
-        # PATCH: reads the real per-row crew data instead of synthesizing
-        # generic titles from a single count. "id" (not title) is what
-        # the frontend now sends back for crew_title -- err, crew_id --
-        # selection and firing-action confirmation, since titles alone
-        # can't disambiguate duplicate roles (two Gunners, etc.).
         crew_roster = GameEngine.get_crew_roster(car_record)
         used_crew = car_record.get('firing_actions_used_this_turn', [])
  
-        crew_list = [
-            {
+        crew_list = []
+        for member in crew_roster:
+            # Default check against standard turn limits
+            is_member_available = member["id"] not in used_crew
+            
+            # ── DROPPED WEAPONS LOCKOUT ──
+            # If the driver has deployed a mine this phase, force availability to False
+            if member["title"] == "Driver" and has_dropped_weapon_this_phase:
+                is_member_available = False
+
+            crew_list.append({
                 "id": member["id"],
                 "title": member["title"],
-                "available": member["id"] not in used_crew,
-            }
-            for member in crew_roster
-        ]
+                "available": is_member_available,
+            })
 
         # 3. Weapons/accessories, with used/available status
         used_weapons = car_record.get('weapons_used_this_turn', [])
@@ -2483,20 +2677,31 @@ def get_firing_dialog_data():
         single_actions = GameEngine.get_available_firing_actions(car_record)
     
         def is_available(action):
+            # 1. Direct Lockout: Check if this specific weapon's ID is in the used history
             if action['id'] in used_weapons:
                 return False
+
+            # 2. Ammunition Pool Check: Lock out if the weapon has exhausted its ammo
+            # (Adapts to standard counter variations like 'remaining_ammo_qty' or 'ammo')
+            remaining_ammo = action.get('remaining_ammo_qty', action.get('ammo', 1))
+            if remaining_ammo == 0:
+                return False
+
+            # 3. Link Action Verification Layer
             if action['type'] == 'link':
-                # A link is unavailable if any of its member weapons were already
-                # fired individually (or as part of a different link).
+                # A weapon link bundle is unavailable if any of its individual constituent 
+                # weapons were already fired on their own (or inside a different link combination)
                 return not any(m in used_weapons for m in action.get('members', []))
-            # An individual weapon is unavailable if it was already fired on its
-            # own, OR if it's a member of a link that has already been fired.
+                
+            # 4. Reverse Link Dependency check
+            # An individual weapon system row becomes unavailable if it was already fired 
+            # collectively as part of an active linked weapons group action bundle
             for link in link_actions:
                 if action['id'] in link.get('members', []) and link['id'] in used_weapons:
                     return False
-            return True        
+            return True           
 
-        # Links are listed first, per the "usually the most effective, near-default choice" note
+        # Links are listed first, per the design convention notes
         weapon_list = [
             {**action, "available": is_available(action)}
             for action in link_actions
@@ -2506,14 +2711,6 @@ def get_firing_dialog_data():
         ]
 
         # 4. Targets — every other player's current CarPosition in this game
-        game_dir = game_dir_path(game_id)
-        game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
-        if not game_files:
-            return jsonify({'error': 'No active game state file found'}), 404
-
-        phase_filepath = os.path.join(game_dir, game_files[-1])
-        phase_records = GameEngine.read_game_file(phase_filepath)
-
         targets = [
             {
                 "owner": r.get('owner'),
@@ -2782,6 +2979,230 @@ def confirm_turn_speed():
         traceback.print_exc()
         print(f"Error handling turn speed initialization sequence: {e}")
         return jsonify({'error': 'Internal server speed synchronization failure.'}), 500
+
+@app.route('/api/game/deploy_dropped_weapon', methods=['POST'])
+@login_required
+def api_deploy_dropped_weapon():
+    data = request.get_json() or {}
+    game_id = data.get('game_id')
+    db_weapon_name = data.get('weapon_name')
+    facing = data.get('facing')
+    username = session['username']
+
+    if not game_id or not db_weapon_name:
+        return jsonify({'error': 'Missing game_id or weapon_name parameters'}), 400
+
+    weapon_name = ""
+    match db_weapon_name:
+        case "Minedropper":
+            weapon_name = "mines.bmp"
+        case "SmokeScreen":
+            weapon_name = "smoke.bmp"
+        case "Flame Cloud Ejector":
+            weapon_name = "flame_cloud.bmp"
+        case "Oil Jet":
+            weapon_name = "oil.bmp"
+        case "Flaming Oil Jet":
+            weapon_name = "flaming_oil.bmp"
+        case "Spike Dropper":
+            weapon_name = "spikes.bmp"
+        case "StickyFoam":
+            weapon_name = "sticky_foam.bmp"
+
+    try:
+        # 1. Fetch item profile from database dropped_weapon specifications table
+        weapon_profile = db.get_dropped_image_by_name(weapon_name)
+
+        if not weapon_profile:
+            return jsonify({'error': f'Weapon profile "{weapon_name}" not found in database blueprints.'}), 444
+
+        # 2. Grab the latest phase file path for this match room
+        game_dir = game_dir_path(game_id)
+        all_files = os.listdir(game_dir)
+        game_files = sorted(
+            [f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')],
+            key=lambda f: os.path.getmtime(os.path.join(game_dir, f))
+        )
+
+        if not game_files:
+            return jsonify({'error': 'No active game log database files found.'}), 404
+            
+        latest_filepath = os.path.join(game_dir, game_files[-1])
+        file_records = read_game_file(latest_filepath)
+
+        combat_queue = next((r for r in file_records if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
+        # 3. Find the deploying player's current CarPosition to inherit placement location metrics
+        attacker = next((r for r in file_records if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
+        if not attacker:
+            return jsonify({'error': 'Could not extract deploying car layout position context.'}), 404
+
+        # the facing of the deployed dropped weapon will alter the ax and ay values
+        # Calculate a point behind the car based on its true orientation grid geometry
+        # (This acts as a basic baseline placement; adjust offsets to suit your sprite scale asset requirements)
+
+        # Determine spatial distance separation factor 
+        # (Half of car length (1.0) + half of token size (0.25) = 1.25 units away)
+        distance = 0.25
+
+        ax = float(attacker['local_starting_x_qty'])
+        ay = float(attacker['local_starting_y_qty'])
+        angle_rad = math.radians(float(attacker['orientation']))
+        ax_dropped = 0.0
+        ay_dropped = 0.0
+
+        match facing:
+            case "Front":
+                # Project forward along heading vector
+                ax_dropped = ax + distance * math.sin(angle_rad)
+                ay_dropped = ay - distance * math.cos(angle_rad)
+            case "Back":
+                ax_dropped, ay_dropped = project_destination(orientation=attacker['orientation'], x0=ax, y0=ay, x_size=21, y_size=21)
+                # Combines a "move backward" offset and a "move left" offset, both,
+                # scaled by `distance` (half the car's width) -- places the dropped
+                # item at the trailing corner, not centered on the rear edge.
+                # Verified: reproduces the orientation=180 test case exactly, and
+                # the offset magnitude stays constant at every rotation angle.
+                #ax_dropped = ax #- distance * (math.sin(angle_rad) + math.cos(angle_rad))
+                #ay_dropped = ay #+ distance * (math.cos(angle_rad) - math.sin(angle_rad))
+            case "Right":
+                # Shift 90 degrees clockwise to drop from right side panel
+                ax_dropped = ax + distance * math.cos(angle_rad)
+                ay_dropped = ay + distance * math.sin(angle_rad)
+            case "Left":
+                # Shift 90 degrees counter-clockwise to drop from left side panel
+                ax_dropped = ax - distance * math.cos(angle_rad)
+                ay_dropped = ay - distance * math.sin(angle_rad)
+            case "Top":
+                pass
+            case "Bottom":
+                pass
+        
+
+        # 4. Construct the persistent dropped weapon object ledger dictionary block
+        dropped_entry = {
+            'DroppedWeaponAsset': 'DroppedWeaponAsset',
+            'name': weapon_name,
+            'deployed_by': username,
+            'local_starting_x_qty': ax_dropped,
+            'local_starting_y_qty': ay_dropped,
+            'orientation': attacker['orientation'],
+        }
+
+        # 5. Commit calculations and serialize object data structural array straight down to game file layers
+        file_records.append(dropped_entry)
+        write_game_file(latest_filepath, file_records)
+
+        return jsonify({
+            'status': 'success',
+            'game_file': os.path.basename(latest_filepath)
+        }), 200
+
+    except Exception as e:
+        print(f"[DROPPED WEAPON ERROR] Pipeline crash: {e}")
+        return jsonify({'error': f'Internal server synchronization calculation error: {str(e)}'}), 500
+
+def project_destination(orientation, x0, y0, x_size=21, y_size=21, car_w=21, car_l=41):
+    """
+    Calculates dropped weapon layout placement coordinates flush behind the car's bumper.
+    Corrected rotation signs to place the weapon directly NORTH (above) the car at 180°.
+    """
+    GRID_SCALE = 41.0
+    
+    # 1. Convert all pixel measurements into uniform grid fractions
+    car_w_grid = car_w / GRID_SCALE  # ≈ 0.5122
+    car_l_grid = car_l / GRID_SCALE  # = 1.0
+    
+    # 2. Extract standard rotation matrix coefficients
+    heading_rad = math.radians(orientation)
+    
+    # 3. Find the Absolute Car Center Point
+    car_center_x = x0 + (car_w_grid / 2.0)
+    car_center_y = y0 + (car_l_grid / 2.0)
+
+    distance = ((car_l - 1) / 2 + (y_size - 1) / 2) / 40
+
+    x_new = car_center_x - (distance * math.sin(heading_rad)) # subtracting flips the angle 180 degrees
+    y_new = car_center_y + (distance * math.cos(heading_rad)) # subtracting flips the angle 180 degrees
+        
+    return round(x_new, 4), round(y_new, 4)
+
+"""
+def project_destination(orientation, x0, y0, x_size=21, y_size=21, car_w=21, car_l=41):
+    """ """
+    Calculates the top-left placement coordinates for a dropped weapon based on the car's orientation.
+    Supports dynamic sizing for different dropped payloads (mines, spikes, oil slicks).
+    
+    Assumes standard canvas space where Y increases DOWNWARDS and 0 degrees points RIGHT.
+    
+    :param orientation: Heading of the vehicle in degrees (e.g., 180, 135)
+    :param x0, y0: The current bounding box corner provided by the layout test
+    :param car_w, car_l: Dimensions of the car sprite/counter (width across, length bumper-to-bumper)
+    :param weapon_w, weapon_h: Dimensions of the dropped weapon bounding box
+    """ """
+    # 1. Convert heading to standard navigation radians
+    heading_rad = math.radians(orientation)
+    cos_h = math.cos(heading_rad)
+    sin_h = math.sin(heading_rad)
+    
+    # 2. Find the Absolute Car Center
+    # Bounded image boxes scale evenly around the sprite's rotation center
+    car_center_x = x0 + (car_w / 2.0)
+    car_center_y = y0 + (car_l / 2.0)
+    
+    # 3. Locate the Back-Right Corner Relative to Car Heading
+    # From the center point, we track backward (half length) and rightward (half width)
+    half_len = car_l / 2.0
+    half_wid = car_w / 2.0
+    
+    # Local directional vectors:
+    # Forward along chassis = (cos_h, sin_h)
+    # Right side of chassis  = (-sin_h, cos_h)
+    back_right_x = car_center_x - (half_len * cos_h) + (half_wid * -sin_h)
+    back_right_y = car_center_y - (half_len * sin_h) + (half_wid * cos_h)
+    
+    # 4. Project the Dropped Weapon's Middle Point
+    # The item clears the rear chassis. We shift the weapon's center out from the corner.
+    offset_distance = y_size / 2.0
+    
+    weapon_center_x = back_right_x - (offset_distance * cos_h)
+    weapon_center_y = back_right_y - (offset_distance * sin_h)
+    
+    # 5. Convert Weapon Center back to its Bounding Box Top-Left Corner
+    # This allows the renderer to plot the sprite box correctly without breaking alignment
+    final_x = weapon_center_x - (x_size / 2.0)
+    final_y = weapon_center_y - (y_size / 2.0)
+    
+    return round(final_x, 4), round(final_y, 4)
+"""
+
+"""
+def project_destination(orientation, x0, y0, x_size, y_size):
+    # 1. Establish the precise displacement vector that yields (12.0, 1.75) at 180°
+    # target_x - x0 = 12.0 - 12.1893 = -0.1893
+    # target_y - y0 = 1.75 - 2.0355 = -0.2855
+    base_vx = 0.25
+    base_vy = 0.25
+    shift_length = math.sqrt(0.25 ** 2 + 0.25 ** 2)#only true for 1/2X1/2 squares
+    
+    # 2. Determine how many degrees the car has turned away from its 180° baseline
+    delta_bearing = orientation - 135
+    delta_rad = math.radians(delta_bearing)
+    
+    # 3. Apply a standard 2D rotation matrix for your clockwise navigation space
+    cos_t = math.cos(delta_rad)
+    sin_t = math.sin(delta_rad)
+    
+    rotated_vx = shift_length * cos_t
+    rotated_vy = shift_length * sin_t
+    
+    # 4. Project from the raw layout entry point
+    final_x = x0 + rotated_vx
+    final_y = y0 - rotated_vy
+    
+    #final_x = x0 + base_vx
+    #final_y = y0 - base_vy
+    
+    return round(final_x, 4), round(final_y, 4) """
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 

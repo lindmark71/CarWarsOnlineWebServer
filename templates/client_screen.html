@@ -1297,45 +1297,7 @@
             ctx.scale(mapState.zoom, mapState.zoom);
             
             // Paint the server-rasterized game map sheet 
-            ctx.drawImage(mapState.image, 0, 0);
-        
-            // 3. ── 🧪 SAFE DIAGNOSTIC VISUAL ANCHOR ──
-            // This safely loops through whatever entries are inside the client memory array
-            // to drop a neon dot on exactly what coordinate coordinates the browser reads.
-            if (typeof file_data !== 'undefined' && Array.isArray(file_data)) {
-                file_data.forEach((entry, i) => {
-                    if (entry && (entry.CarPosition === 'CarPosition' || (entry.get && entry.get('CarPosition') === 'CarPosition'))) {
-                        
-                        // Safely harvest coordinates whether they are raw properties or mapped entries
-                        const rawX = entry.local_starting_x_qty || (entry.get ? entry.get('local_starting_x_qty') : null);
-                        const rawY = entry.local_starting_y_qty || (entry.get ? entry.get('local_starting_y_qty') : null);
-                        
-                        if (rawX !== null && rawY !== null) {
-                            ctx.save();
-                            
-                            // Convert game units/inches directly to canvas pixel space
-                            const dx = Number(rawX) * 40; 
-                            const dy = Number(rawY) * 40;
-                            
-                            ctx.translate(dx, dy);
-                            
-                            // Draw a highly visible neon pink circle exactly at the coordinate location
-                            ctx.beginPath();
-                            ctx.arc(0, 0, 8, 0, 2 * Math.PI);
-                            ctx.fillStyle = "#ff0055";
-                            ctx.fill();
-                            
-                            // Add a tiny text label identifying the entry index
-                            ctx.fillStyle = "#ffffff";
-                            ctx.font = "bold 10px Arial";
-                            ctx.fillText("Car " + i, 12, 4);
-                            
-                            ctx.restore();
-                            console.log(`[DOT PLACED] Placed tracking node index ${i} at: (${rawX}, ${rawY})`);
-                        }
-                    }
-                });
-            }
+            ctx.drawImage(mapState.image, 0, 0); 
         
             // 4. DYNAMIC GHOST PREVIEW ENGINE MATRIX
             if (typeof currentManeuverGhost !== 'undefined' && currentManeuverGhost && currentManeuverGhost.imageElement) {
@@ -1713,7 +1675,7 @@
 
             // Firing Action stays disabled during movement phases —
             // it activates during combat phases (handled separately later)
-            document.getElementById('ID_FIRE').disabled = true;
+            document.getElementById('ID_FIRE').disabled = enabled;
         }
 
         async function loadGameFileList(gameId) {
@@ -1729,7 +1691,7 @@
                 console.error('Error loading game file list:', err);
             }
             updateNavButtons();
-            updateMovementButtons();   // ← ensure buttons start disabled
+            //updateMovementButtons();   // ← ensure buttons start disabled
             showCurrentGameFile(true);
         }
         
@@ -2136,6 +2098,7 @@
         async function confirmJoinGame() {
             const gameId = document.getElementById('joinGameSelect').value;
             const design = document.getElementById('joinDesignSelect').value;
+            console.log("confirmJoinGame: value of design: ", design);
             const carImageName = document.getElementById('joinCarImageSelect').value;
         
             if (!gameId) { alert('Please select a game to join.'); return; }
@@ -2153,30 +2116,30 @@
             try {
                 // ── NEW STEP 1: SQL TABLE ROW INITIALIZATION & FILE RESERVATION ──
                 // Save the chosen structural design to database state tables first
-                const registerDesignResponse = await fetch('/set_player_design', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ game_id: gameId, username: currentUser, design: design })
-                });
+                //const registerDesignResponse = await fetch('/set_player_design', {
+                //    method: 'POST',
+                //    headers: { 'Content-Type': 'application/json' },
+                //    body: JSON.stringify({ game_id: gameId, username: currentUser, design: design })
+                //});
                 
-                if (!registerDesignResponse.ok) {
-                    const err = await registerDesignResponse.json();
-                    alert(`Could not initialize player design blueprint asset: ${err.error}`);
-                    return;
-                }
+                //if (!registerDesignResponse.ok) {
+                //    const err = await registerDesignResponse.json();
+                //    alert(`Could not initialize player design blueprint asset: ${err.error}`);
+                //    return;
+                //}
         
                 // ── NEW STEP 2: ASSIGN CAR IMAGE LOGS ──
-                const carImgResponse = await fetch('/set_player_car_image', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ game_id: gameId, car_image_name: carImageName })
-                });
+                //const carImgResponse = await fetch('/set_player_car_image', {
+                //    method: 'POST',
+                //    headers: { 'Content-Type': 'application/json' },
+                //    body: JSON.stringify({ game_id: gameId, car_image_name: carImageName })
+                //});
                 
-                if (!carImgResponse.ok) {
-                    const err = await carImgResponse.json();
-                    alert(`Joined but could not assign car image: ${err.error}`);
-                    return;
-                }
+                //if (!carImgResponse.ok) {
+                //    const err = await carImgResponse.json();
+                //    alert(`Joined but could not assign car image: ${err.error}`);
+                //    return;
+                //}
         
                 // ── NEW STEP 3: EXECUTE MAIN JOIN GAME HANDLER ROUTINE ──
                 // Now that the player design text snapshot is completely saved to disk,
@@ -2745,6 +2708,7 @@
         
                             if (gameStatePayload.success && gameStatePayload.ticker_data) {
                                 const tk = gameStatePayload.ticker_data;
+                                console.log("startPolling: value of tk.mode: ", tk.mode)
                                 togglePhaseControls(tk.mode, tk.active_player);
         
                                 const formattedStatusString = `${tk.game_name}: Turn ${tk.turn}, Phase ${tk.phase}, [${tk.mode}], ${tk.active_player}'s turn.`;
@@ -2779,45 +2743,58 @@
         // client_screen.html (Interface Controls Synchronization Update)
 
         function togglePhaseControls(currentSubphase, currentActivePlayer) {
-            console.lot(" Beginning of togglePhaseControl")
+            console.log(" Beginning of togglePhaseControl")
             // Safely look up the username element
             const userElement = document.getElementById('current-username') || document.getElementById('topBarUsername');
             const currentUsername = userElement ? userElement.innerText.trim() : currentUser;
             const isMyTurn = (currentActivePlayer === currentUsername);
-            console.lot("  Value of isMyTurn: ", isMyTurn)
-
+            console.log("  Value of isMyTurn: ", isMyTurn)
+            // Explicit list of movement-only button IDs
+            const movementBtnIds = [
+                'ID_D6L', 'ID_D5L', 'ID_D4L', 'ID_D3L', 'ID_D2L', 'ID_D1L',
+                'ID_STR', 'ID_HALF',
+                'ID_D1R', 'ID_D2R', 'ID_D3R', 'ID_D4R', 'ID_D5R', 'ID_D6R'
+            ];
 
             // Select the correct control container element IDs
             const movementButtonContainer = document.getElementById('movement-controls-panel');
             const firingActionButton = document.getElementById('ID_FIRE'); // ✅ Fixed ID from 'firing-action-btn' to true HTML id 'ID_FIRE'
 
-            console.lot("   Value of firingActionButton.disabled: ", currentSubphase)
+            console.log("   Value of currentSubphase: ", currentSubphase)
             if (currentSubphase === 'Combat') {
                 // --- WE ARE IN THE COMBAT SUBPHASE ---
-                if (movementButtonContainer) {
-                    movementButtonContainer.style.pointerEvents = 'none';
-                    movementButtonContainer.style.opacity = '0.4';
-                }
+                // 1. Gray out and lock only the movement buttons, leaving the panel container accessible
+                movementBtnIds.forEach(id => {
+                    const btn = document.getElementById(id);
+                    if (btn) {
+                        btn.disabled = true;
+                        btn.style.opacity = '0.4';
+                    }
+                });
 
                 if (firingActionButton) { // ✅ Added critical safety check wrapper
                     firingActionButton.disabled = !isMyTurn;
-                    console.lot("    Value of firingActionButton.disabled: ", firingActionButton.disabled)
+                    console.log("    Value of firingActionButton.disabled: ", firingActionButton.disabled)
                     firingActionButton.style.opacity = isMyTurn ? '1.0' : '0.5';
                 }
             } else {
                 // --- WE ARE IN THE MOVEMENT SUBPHASE ---
-                if (movementButtonContainer) {
-                    movementButtonContainer.style.pointerEvents = isMyTurn ? 'auto' : 'none';
-                    movementButtonContainer.style.opacity = isMyTurn ? '1.0' : '0.4';
-                }
+                // 1. Restore individual control flags to movement systems based on player turn initiative
+                movementBtnIds.forEach(id => {
+                    const btn = document.getElementById(id);
+                    if (btn) {
+                        btn.disabled = !isMyTurn;
+                        btn.style.opacity = isMyTurn ? '1.0' : '0.4';
+                    }
+                });
 
                 if (firingActionButton) { // ✅ Added critical safety check wrapper
                     firingActionButton.disabled = true;
-                    console.lot("    Value of firingActionButton.disabled: ", firingActionButton.disabled)
+                    console.log("    Value of firingActionButton.disabled: ", firingActionButton.disabled)
                     firingActionButton.style.opacity = '0.5';
                 }
             }
-            console.lot(" Ending of togglePhaseControl")
+            console.log(" Ending of togglePhaseControl")
         }
 
 // ── Movement Management ───────────────────────────────────────────
@@ -3792,7 +3769,37 @@
         
             const selectedWeaponRadio = document.querySelector('input[name="firingWeapon"]:checked');
             const weaponId = selectedWeaponRadio ? selectedWeaponRadio.value : null;
-        
+            if (selectedWeaponRadio) {
+                // 1. Get the actual user-facing text description next to the selected radio button
+                const weaponLabelText = selectedWeaponRadio.closest('label').innerText || "";
+    
+                // 2. Safely parse out internal tokens/brackets so you have a clean string (e.g., "Oil Slick")
+                const realWeaponName = weaponLabelText.split('(')[0].replace('Weapon:', '').replace('--', '').trim();
+                // harvests whatever word is trapped inside the ( ) brackets
+                const facingDirection = (weaponLabelText.match(/\(([^)]+)\)/) || ["", ""])[1].trim();
+   
+
+                // ─── ADD THIS DROPPED WEAPON INTERCEPT BLOCK ───
+                // Check if the selected weapon matches your dropping systems (e.g., Mines, Oil Slicks, Smoke)
+                const droppedWeaponKeywords = ['flame_cloud', 'flaming_oil', 'oil', 'ice', 'Minedropper', 'paint', 'sand', 'smoke', 'spikes', 'sticky_foam', 'tear_gas'];
+                const isDroppedWeapon = droppedWeaponKeywords.some(keyword => realWeaponName.includes(keyword));
+                console.log("confirmFiringActionDialog: isDroppedWeapon: " , isDroppedWeapon);
+                console.log("confirmFiringActionDialog: weaponId: " , weaponId);
+                console.log("confirmFiringActionDialog: weaponLabelText: " , weaponLabelText);
+                console.log("confirmFiringActionDialog: realWeaponName: " , realWeaponName);
+                console.log("confirmFiringActionDialog: facingDirection: " , facingDirection);
+                
+
+                if (isDroppedWeapon && realWeaponName !== "none") {
+                    // Fire the deployment pipeline with the selected weapon string name
+                    handleDroppedWeaponDeployment(realWeaponName, facingDirection);
+    
+                    // Clean up UI: Close the dialog modal out of focus safely
+                    closeFiringActionDialog(); 
+                    return; // Stop execution early so it doesn't double-fire standard attacks
+                }
+            }
+
             // ── 1. PASS OPTION ROUTING INTERCEPT ──
             if (weaponId === "none") {
                 try {
@@ -3831,31 +3838,31 @@
 
             const targetId = document.querySelector('input[name="firingTarget"]:checked')?.value;
 
-    try {
-        const response = await fetch('/api/game/confirm_firing_action', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        game_id: targetGameId,
-                        crew_id: crewId,
-                        weapon_id: weaponId,
-                        target_owner: targetId || ""
-                    })
-                });
+            //try {
+            //    const response = await fetch('/api/game/confirm_firing_action', {
+            //                method: 'POST',
+            //                headers: { 'Content-Type': 'application/json' },
+            //                body: JSON.stringify({
+            //                game_id: targetGameId,
+            //                crew_id: crewId,
+            //                weapon_id: weaponId,
+            //                target_owner: targetId || ""
+            //            })
+            //        });
 
-                if (response.ok) {
-                    closeFiringActionDialog();
-                    if (typeof loadGameFileList === "function") {
-                        loadGameFileList(targetGameId);
-                    }
-                    console.log("Attack registration finalized.");
-                } else {
-                    const err = await response.json();
-            alert(`Combat confirmation failed: ${err.error}`);
-                }
-            } catch (err) {
-                console.error("Network crash committing raw active combat actions:", err);
-            }
+            //        if (response.ok) {
+            //            closeFiringActionDialog();
+            //            if (typeof loadGameFileList === "function") {
+            //                loadGameFileList(targetGameId);
+            //            }
+            //            console.log("Attack registration finalized.");
+            //        } else {
+            //            const err = await response.json();
+            //    alert(`Combat confirmation failed: ${err.error}`);
+            //        }
+            //    } catch (err) {
+            //        console.error("Network crash committing raw active combat actions:", err);
+            //    }
         }
         
         function closeFiringActionDialog() {
@@ -4285,6 +4292,44 @@
                         if (halfBtn) halfBtn.disabled = false;
                     }
                 }
+            }
+        }
+
+        async function handleDroppedWeaponDeployment(weaponName, facingDirection) {
+            if (!navState.gameId) {
+                console.error("No active Game ID found for deployment.");
+                return;
+            }
+        
+            console.log(`[DROPPED WEAPON] Processing deployment for: ${weaponName} `);
+            console.log(`[DROPPED WEAPON] Processing deployment for: ${facingDirection} `);
+        
+            try {
+                const response = await fetch('/api/game/deploy_dropped_weapon', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        game_id: navState.gameId,
+                        weapon_name: weaponName,
+                        facing: facingDirection
+                    })
+                });
+        
+                if (response.ok) {
+                    const result = await response.json();
+                    alert(`Successfully deployed ${weaponName}!`);
+                    
+                    // Force the map canvas engine to refresh and draw the newly added asset object
+                    if (result.game_file) {
+                        showMapPreview(result.game_file, true, navState.gameId);
+                    }
+                } else {
+                    const err = await response.json();
+                    alert(`Deployment failed: ${err.error}`);
+                }
+            } catch (err) {
+                console.error("Network error during dropped weapon validation:", err);
+                alert("A network error occurred while deploying the hazard.");
             }
         }
 

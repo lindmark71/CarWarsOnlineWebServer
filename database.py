@@ -115,15 +115,15 @@ def get_startable_games_for_user(username):
 
 # ── Game Players ──────────────────────────────────────────────────────────────
 
-def join_game(game_id, username, position_number=0):
+def join_game(game_id, username, design, position_number=0):
     conn = get_db()
     try:
         conn.execute('''
             INSERT INTO game_players
                 (game_id, username, design, joined_at, position_number,
                  is_ready, car_image)
-            VALUES (?, ?, NULL, ?, ?, 0, NULL)
-        ''', (game_id, username, datetime.now().isoformat(), position_number))
+            VALUES (?, ?, ?, ?, ?, 0, NULL)
+        ''', (game_id, username, design, datetime.now().isoformat(), position_number))
         conn.commit()
     finally:
         conn.close()
@@ -142,13 +142,33 @@ def get_game_players(game_id):
 def set_player_design(game_id, username, design_filename):
     conn = get_db()
     try:
-        conn.execute('''
+        # 1. Attempt the UPDATE statement exactly as before
+        cursor = conn.execute('''
             UPDATE game_players SET design = ?
             WHERE game_id = ? AND username = ?
         ''', (design_filename, game_id, username))
+        
+        # 2. CHECK EFFECT: If no rows were changed, the row doesn't exist yet!
+        if cursor.rowcount == 0:
+            print(f"[DB UPSERT] No existing row for {username} in game {game_id}. Creating fresh slot...")
+            
+            # 3. Force an INSERT statement to initialize the row with our values
+            joined_at = "a"
+            conn.execute('''
+                INSERT INTO game_players (game_id, username, design, joined_at)
+                VALUES (?, ?, ?, ?)
+            ''', (game_id, username, design_filename, joined_at))
+            
         conn.commit()
+        return True # Return success to the web server
+        
+    except Exception as db_err:
+        print(f"[DB ERROR] Critical exception in set_player_design: {db_err}")
+        return False # Return failure state so web_server.py can log it or throw a 500
+        
     finally:
         conn.close()
+
 
 def set_player_car_image(game_id, username, car_image_name):
     """Assign a car image name to a player in a game."""
