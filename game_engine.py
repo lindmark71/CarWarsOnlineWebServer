@@ -8,7 +8,6 @@ from datetime import datetime
 import inflect
 from num2words import num2words
 
-
 GAME_FOLDER = './games'
 TC_BONUS_BY_TYPE = {
     "Targeting Computer": 1,
@@ -352,10 +351,6 @@ class GameEngine:
         DOES NOT write to the file on disk — returns the ghost node dictionary 
         directly to the web server route to eliminate file-lock contentions.
         """
-        import os
-        import re
-        import ast
-        import math
 
         # 1. Self-contained path composition to find the game folder
         game_dir = os.path.join('./games', str(game_id).strip())
@@ -398,43 +393,40 @@ class GameEngine:
         current_y = float(norm_car.get('local_starting_y_qty', 0.0))
         current_angle = float(norm_car.get('orientation', 0.0))
 
-        # ── 📐 CORE VECTOR GEOMETRIC PHYSICS CALCULATIONS ──
-        CAR_LENGTH = 1.0
+        # ── GEOMETRY ──
+        HALF_W, HALF_H = 10.5, 20.5          # half of the 21x41 sprite, in px
         final_angle = current_angle
 
+        # File x/y is the top-left of the unrotated box, so the center is:
+        cx = current_x * 40.0 + HALF_W
+        cy = current_y * 40.0 + HALF_H
+
+        rad = math.radians(current_angle)
+        fwd_x, fwd_y = math.sin(rad), -math.cos(rad)
+        rgt_x, rgt_y = math.cos(rad), math.sin(rad)
+
+        # Client anchor = rear-right corner of the car, stepped forward.
+        # STR and bends step a full car length (40px), HALF steps 20px.
         if maneuver == 'STR':
-            rad = math.radians(current_angle)
-            final_x = current_x + (math.sin(rad) * CAR_LENGTH)
-            final_y = current_y + (-math.cos(rad) * CAR_LENGTH)
+            step = 40.0
         elif maneuver == 'HALF':
-            rad = math.radians(current_angle)
-            final_x = current_x + (math.sin(rad) * (CAR_LENGTH / 2.0))
-            final_y = current_y + (-math.cos(rad) * (CAR_LENGTH / 2.0))
-        elif maneuver.startswith('D'):  # Bend severity turning arc matrix tracking
+            step = 20.0
+        elif maneuver.startswith('D'):
+            step = 40.0
             severity = int(maneuver[1:-1]) if re.search(r'\d+', maneuver) else 1
             direction = maneuver[-1]
             delta = severity * 15
-            
-            # 1. Calculate final facing orientation for the file metadata
-            final_angle = (current_angle - delta if direction == 'L' else current_angle + delta) % 360
-            
-            # 2. FIX: Project the physical distance forward using the STARTING angle vector
-            # (Matches 'STR' physics layout to keep spatial centers locked on grid intersections)
-            start_rad = math.radians(current_angle)
-            final_x = current_x + (math.sin(start_rad) * CAR_LENGTH)
-            final_y = current_y + (-math.cos(start_rad) * CAR_LENGTH)
-            
-            # Note: Make sure your ghost node dictionary records final_angle as its 'orientation'!            
-            #severity = int(maneuver[1:-1]) if re.search(r'\d+', maneuver) else 1
-            #direction = maneuver[-1]
-            #delta = severity * 15
-            #final_angle = (current_angle - delta if direction == 'L' else current_angle + delta) % 360
-            #rad = math.radians(final_angle)
-            #final_x = current_x + (math.sin(rad) * CAR_LENGTH)
-            #final_y = current_y + (-math.cos(rad) * CAR_LENGTH)
+            final_angle = (current_angle - delta if direction == 'L'
+                           else current_angle + delta) % 360
         else:
-            final_x, final_y = current_x, current_y
-        
+            step = 0.0
+
+        anchor_x = cx + HALF_W * rgt_x - HALF_H * fwd_x + step * fwd_x
+        anchor_y = cy + HALF_W * rgt_y - HALF_H * fwd_y + step * fwd_y
+
+        final_x = anchor_x / 40.0
+        final_y = anchor_y / 40.0
+                
         # 4. Construct the transient ghost node atom completely in RAM
         ghost_node = {
             'ProposedCarPosition': 'ProposedCarPosition',

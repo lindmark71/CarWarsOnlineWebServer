@@ -1280,14 +1280,10 @@
         resizeCanvas();
         
         function drawMap() {
-            // 1. Completely clear the viewport frame
+            // 1. Master Reset: Completely clear the viewport canvas frame context
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // ── 🧪 DETAILED DIAGNOSTIC ANCHOR ──
-            console.log("[DIAGNOSTIC] drawMap triggered. Map loaded:", !!mapState.image, 
-                        "Ghost loaded:", typeof currentManeuverGhost !== 'undefined' ? !!currentManeuverGhost : "UNDEFINED GLOBAL");
         
-            // Stop execution early if the main map asset hasn't finished loading yet
+            // Stop execution early if the master map sheet asset hasn't finished loading yet
             if (!mapState.image) return;
         
             ctx.save();
@@ -1295,36 +1291,179 @@
             // 2. VIEWPORT MASTER LAYER: Handle all panning and zooming matrix steps safely
             ctx.translate(mapState.panX, mapState.panY);
             ctx.scale(mapState.zoom, mapState.zoom);
-            
-            // Paint the server-rasterized game map sheet 
-            ctx.drawImage(mapState.image, 0, 0); 
         
-            // 4. DYNAMIC GHOST PREVIEW ENGINE MATRIX
+            // Paint the server-rasterized game map sheet backdrop (THIS RESTORES YOUR MAP GRID!)
+            ctx.drawImage(mapState.image, 0, 0);
+        
+            // 3. DYNAMIC GHOST PREVIEW ENGINE MATRIX (Safely sandboxed so it CANNOT crash the map backdrop)
+            // 3. DYNAMIC GHOST PREVIEW ENGINE MATRIX
+
             if (typeof currentManeuverGhost !== 'undefined' && currentManeuverGhost && currentManeuverGhost.imageElement) {
                 const img = currentManeuverGhost.imageElement;
-                
+
                 if (img.complete && img.naturalWidth !== 0) {
                     ctx.save();
-        
-                    const gx = currentManeuverGhost.x * 40;
-                    const gy = currentManeuverGhost.y * 40;
-                    const angleRad = (currentManeuverGhost.orientation * Math.PI) / 180;
-        
-                    ctx.translate(gx, gy);
-                    ctx.rotate(angleRad);
-        
-                    ctx.globalAlpha = 0.50; // 50% opacity mask rules for temporary preview
-        
-                    // Pivot the ghost chassis asset entirely from its rear axle center line
-                    ctx.drawImage(img, -21 / 2, -41, 21, 41);
-        
+
+                    // 1. Establish pristine center baseline coordinates from the server update
+                    let gx = (currentManeuverGhost.x ?? currentManeuverGhost.local_starting_x_qty) * 40;
+                    let gy = (currentManeuverGhost.y ?? currentManeuverGhost.local_starting_y_qty) * 40;
+                    const angleRad = ((currentManeuverGhost.orientation ?? 0) * Math.PI) / 180;
+
+                    // 2. ENFORCE CLEAN MANEUVER CODES (No duplicate default string assignments below this line!)
+                    const maneuverType = currentManeuverGhost.maneuver_preview_type || 'STR';
+
+                    // 3. Apply general transparency rules mask safely
+                    ctx.globalAlpha = 0.50; 
+
+                    // 4. BRANCH RENDERING CHANNELS BY PIVOT GEOMETRY
+                    if (maneuverType === 'STR' || maneuverType === 'HALF') {
+                        // STANDARD STRAIGHT (STR) / HALF MOVES
+                        ctx.translate(gx, gy);
+                        ctx.rotate(angleRad);
+            
+                        // Draw perfectly centered over the rear-center line split (-21 / 2 = -10.5px)
+                        ctx.drawImage(img, -21, -41, 21, 41);
+                    }
+                    else if (maneuverType.includes('R')) {
+                        // RIGHT BENDS: Natively pivot off the rear-center to rear-right baseline
+                        ctx.translate(gx, gy);
+                        ctx.rotate(angleRad);
+            
+                        // Draw car body entirely to the left so its right edge touches local (0,0)
+                        ctx.drawImage(img, -21, -41, 21, 41);
+                    } else if (maneuverType.endsWith('L')) {   // adjust to your real codes
+                        // Starting heading = final heading + the turn amount (left turns reduce the angle).
+                        // Prefer a real field from the server if you have one.
+                        const finalDeg = currentManeuverGhost.orientation ?? 0;
+                        const turnDeg = (parseInt(maneuverType.match(/\d/)?.[0] ?? '0', 10)) * 15; // ASSUMPTION: D1=15°, D3=45°...
+                        const startDeg = currentManeuverGhost.start_orientation ?? (finalDeg + turnDeg);
+
+                        ctx.translate(gx, gy);
+                        ctx.rotate((startDeg * Math.PI) / 180);        // into the car's starting frame
+                        ctx.translate(-21, 0);                         // slide to the front-left corner (pivot)
+                        ctx.rotate(((finalDeg - startDeg) * Math.PI) / 180); // swing to the final heading
+                        ctx.drawImage(img, 0, -41, 21, 41);            // ghost's left edge sits on the pivot
+                    }
+
                     ctx.restore();
-                }
+                    // DEBUG: red dot at the server's reported position (unrotated, unshifted)
+                    ctx.save();
+                    ctx.fillStyle = 'red';
+                    ctx.beginPath();
+                    ctx.arc(gx, gy, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();     
+                } 
+
+                ctx.restore();       
             }
-        
             ctx.restore();
         }
+        
+        
+        function handle_game_maneuver_frontend(gameId, maneuverCode) {
+            fetch('/api/game/maneuver', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ game_id: gameId, maneuver: maneuverCode })
+            })
+            .then(res => {
+                if (!res.ok) throw new Error("Maneuver pipeline response failure");
+                return res.json();
+            })
+            .then(data => {
+                if (data.status === "success" && data.ghost) {
+                    let ghostData = data.ghost;
+        
+                    // 1. Create the native browser framework element container
+                    const ghostImgElement = new Image();
+        
+                    // 2. Set up the binding events BEFORE assigning the stream source
+                    ghostImgElement.onload = () => {
+                        console.log("[handle_game_maneuver_frontend] Success! Ghost image preloaded. Repainting canvas...");
+                        if (typeof drawMap === 'function') {
+                            drawMap();
+                        }
+                    };
+        
+                    ghostImgElement.onerror = (err) => {
+                        console.error("[handle_game_maneuver_frontend] CRITICAL: Render compilation failed for stream path:", ghostImgElement.src);
+                    };
+        
+                    // 3. Bind the fresh instance right onto your state management tokens
+                    ghostData.imageElement = ghostImgElement;
+        
+                    //  INSERT THE MANEUVER TYPE FIX HERE 
+                    ghostData.maneuver_preview_type = ghostData.maneuver_preview_type || maneuverCode;
+        
+                    currentManeuverGhost = ghostData;
+                    console.log("[handle_game_maneuver_frontend] Token successfully synchronized. Fetching database image row...");
+        
+                    //  INSERT THE IMAGE ROUTE FALLBACK FIX HERE 
+                    let targetCarName = ghostData.car_image_name;
+                    if (!targetCarName || targetCarName.trim() === "" || targetCarName.toLowerCase() === "default") {
+                        targetCarName = 'blue_car'; 
+                    }
+        
+                    // 4. Hit the metadata lookup route using the sanitized targetCarName variable
+                    fetch(`/get_car_image/${encodeURIComponent(targetCarName)}`)
+                    .then(assetRes => {
+                        if (!assetRes.ok) throw new Error("Asset endpoint unavailable");
+                        return assetRes.json();
+                    })
+                    .then(payload => {
+                        if (payload && payload.base64_data) {
+                            console.log("[handle_game_maneuver_frontend] Database row verified. Injecting PNG stream...");
+                            ghostImgElement.src = `data:image/png;base64,${payload.base64_data}`;
+                        } else {
+                            console.error("[handle_game_maneuver_frontend] Error: Retrieved payload missing required base64 string.");
+                        }
+                    })
+                    .catch(fetchErr => console.error("[handle_game_maneuver_frontend] Database asset parsing failure:", fetchErr));
+                }
+            })
+            .catch(err => console.error("[FRONTEND GHOST PIPELINE CRASH]:", err));
+        }
 
+
+//        function handle_game_maneuver_frontend(gameId, maneuverCode) {
+//            // 1. Fire the standard asynchronous JSON payload request down to the Python backend router
+//            fetch('/api/game/maneuver', {
+//                method: 'POST',
+//                headers: { 'Content-Type': 'application/json' },
+//                body: JSON.stringify({ game_id: gameId, maneuver: maneuverCode })
+//            })
+//            .then(res => {
+//                if (!res.ok) throw new Error("Maneuver processing error");
+//                return res.json();
+//            })
+//            .then(data => {
+//                if (data.status === "success" && data.ghost) {
+//                    // 2. Capture the pristine coordinate layout dictionary profile data block
+//                    let ghostData = data.ghost;
+//                    
+//                    // 3. VITAL FIX: Instantiate and cache the physical HTML image element container framework
+//                    const ghostImgElement = new Image();
+//                    
+//                    // Point the resource target source strictly to your authentic car image asset router route
+//                    ghostImgElement.src = `/get_car_image/${encodeURIComponent(ghostData.car_image_name || 'default')}`;
+//                    
+//                    // 4. Bind the image reference element directly onto the state object node tracking map properties
+//                    ghostData.imageElement = ghostImgElement;
+//                    
+//                    // 5. Update the global state engine variable token
+//                    currentManeuverGhost = ghostData;
+//                    
+//                    // 6. Force the canvas context grid viewport matrix layer layout to re-paint the millisecond it loads
+//                    ghostImgElement.onload = () => {
+//                        if (typeof drawMap === 'function') {
+//                            drawMap(); 
+//                        }
+//                    };
+//                }
+//            })
+//            .catch(err => console.error("[FRONTEND GHOST PIPELINE CRASH]:", err));
+//        }
 
 //        function drawMap() {
 //            ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -2945,124 +3084,60 @@
         // ── Bottom row buttons ────────────────────────────────────────────
         // Helper function to send a driving maneuver to the server
         async function sendManeuver(maneuverCode) {
-            // ── MULTI-CHANNEL EXTRACTION: Fallback cascade gets the live active UUID ──
-            let activeGameId = '';
-            
-            if (typeof currentGameId !== 'undefined' && currentGameId && currentGameId !== "None") {
-                activeGameId = currentGameId;
-            } else if (typeof navState !== 'undefined' && navState.gameId && navState.gameId !== "None") {
-                activeGameId = navState.gameId;
-            } else if (typeof currentManeuverGhost !== 'undefined' && currentManeuverGhost && currentManeuverGhost.gameId) {
-                activeGameId = currentManeuverGhost.gameId;
-            } else {
-                // Final fallback: Attempt to parse it straight out of the active browser URL search params if present
-                const urlParams = new URLSearchParams(window.location.search);
-                activeGameId = urlParams.get('game_id') || urlParams.get('gameId') || '';
-            }
-        
-            // Clean up any lingering whitespace or string-based "None" bugs
-            activeGameId = String(activeGameId).trim();
-            if (activeGameId === "None" || activeGameId === "undefined" || activeGameId === "null") {
-                activeGameId = '';
-            }
-        
-            const activeUser = document.getElementById('topBarUsername') ? document.getElementById('topBarUsername').textContent.trim() : '';
-        
-            // ── DIAGNOSTIC: Watch exactly what values are extracted ──
-            console.log("[MANEUVER VECTOR TRIGGERED] Staging choice:", maneuverCode, "Harvested Game ID:", activeGameId, "User:", activeUser);
-        
+            const activeGameId = navState.gameId;
+
             if (!activeGameId) {
-                console.warn("[GHOST SYSTEM GATED]: Stopped execution. activeGameId resolved to an empty or invalid state.");
+                console.error("[CRITICAL] Cannot staging vector: No active game ID session context tracked.");
                 return;
             }
-        
-            if (!activeUser || activeUser === "...") {
-                console.warn("[GHOST SYSTEM GATED]: Stopped execution. Missing active player profile context username.");
-                return;
-            }
-        
+
             try {
+                // 1. Dispatch coordinate telemetry parameters to the Python layer
                 const response = await fetch('/api/game/maneuver', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        game_id: activeGameId,
-                        username: activeUser,
-                        maneuver: maneuverCode
-                    })
+                    body: JSON.stringify({ game_id: activeGameId, maneuver: maneuverCode })
                 });
         
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log("[NETWORK RES] Payload received from /api/game/maneuver:", data);
+                if (!response.ok) throw new Error("Maneuver processing error");
+                const data = await response.json();
         
-                    if (data.ghost) {
-                        console.log("[NETWORK RES] data.ghost is valid");
-                        const cleanGhost = {};
-                        Object.keys(data.ghost).forEach(key => {
-                            cleanGhost[key.trim()] = data.ghost[key];
-                        });
+                if (data.status === 'success' && data.ghost) {
+                    let ghostData = data.ghost;
         
-                        if (cleanGhost.car_image_name) {
-                            const imgPreload = new Image();
-                            
-                            // Track both resources to synchronize drawing down smoothly
-                            let carSpriteReady = false;
-                            let backgroundMapReady = false;
+                    // 2. Map structural type tags right onto client runtime engine scope
+                    ghostData.maneuver_preview_type = ghostData.maneuver_preview_type || maneuverCode;
         
-                            const checkAndDraw = () => {
-                                if (carSpriteReady && backgroundMapReady) {
-                                    console.log("[RENDER SYNC] Frame and sprite loaded. Redrawing canvas clean.");
-                                    drawMap();
-                                }
-                            };
-        
-                            imgPreload.onload = () => {
-                                console.log("[IMAGE READY] Ghost sprite asset loaded successfully.");
-                                carSpriteReady = true;
-                                checkAndDraw();
-                            };
-        
-                            imgPreload.src = `/get_car_image/${encodeURIComponent(cleanGhost.car_image_name)}`;
-                            if (imgPreload.complete) {
-                                carSpriteReady = true;
-                            }
-                            
-                            // 1. Instantly replace the single tracking coordinate node in memory
-                            currentManeuverGhost = {
-                                x: parseFloat(cleanGhost.local_starting_x_qty || 0),
-                                y: parseFloat(cleanGhost.local_starting_y_qty || 0),
-                                orientation: parseFloat(cleanGhost.orientation || 0),
-                                imageElement: imgPreload,
-                                gameId: activeGameId
-                            };
-        
-                            // 2. TARGET VALIDATION: Drive a fresh request directly to /render_game_file
-                            if (typeof mapState !== 'undefined' && mapState.image) {
-                                const baseSrc = mapState.image.src.split('?')[0];
-                                
-                                // Always attach event listener before assigning the source
-                                mapState.image.onload = () => {
-                                    console.log("[MAP REFRESHED] Received new server frame containing updated ghost coordinates.");
-                                    backgroundMapReady = true;
-                                    checkAndDraw();
-                                };
-                                
-                                // Fire off the cache-buster update chain
-                                mapState.image.src = `${baseSrc}?t=${Date.now()}`;
-                            } else {
-                                console.warn("[GHOST SYSTEM]: mapState.image object structure missing. Falling back.");
-                                backgroundMapReady = true;
-                                checkAndDraw();
-                            }
-                        }
+                    // 3. Fallback tracking logic protection layers for vehicle textures
+                    let targetCarName = ghostData.car_image_name;
+                    if (!targetCarName || targetCarName.trim() === "" || targetCarName.toLowerCase() === "default") {
+                        targetCarName = 'blue_car'; 
                     }
-                } else {
-                    const errData = await response.json().catch(() => ({}));
-                    console.error("Maneuver vector baseline rejected by server:", errData.error || response.statusText);
+        
+                    const ghostImgElement = new Image();
+                    ghostImgElement.onload = () => {
+                        console.log("[RENDER SYNC] Frame and sprite loaded. Redrawing canvas clean.");
+                        if (typeof drawMap === 'function') drawMap();
+                    };
+                    ghostImgElement.onerror = (err) => {
+                        console.error("[IMAGE ERROR] Sub-channel route failure:", err);
+                    };
+        
+                    // 4. Bind browser element references to the localized structure dictionary
+                    ghostData.imageElement = ghostImgElement;
+                    currentManeuverGhost = ghostData;
+        
+                    // 5. Secure target base64 binary rows mapping pipelines safely
+                    const assetRes = await fetch(`/get_car_image/${encodeURIComponent(targetCarName)}`);
+                    if (!assetRes.ok) throw new Error("Asset endpoint unavailable");
+                    const payload = await assetRes.json();
+                    
+                    if (payload && payload.base64_data) {
+                        ghostImgElement.src = `data:image/png;base64,${payload.base64_data}`;
+                    }
                 }
             } catch (err) {
-                console.error("Network crash during ghost positioning sequence:", err);
+                console.error("[FRONTEND GHOST PIPELINE CRASH]:", err);
             }
         }
 
@@ -3781,7 +3856,17 @@
 
                 // ─── ADD THIS DROPPED WEAPON INTERCEPT BLOCK ───
                 // Check if the selected weapon matches your dropping systems (e.g., Mines, Oil Slicks, Smoke)
-                const droppedWeaponKeywords = ['flame_cloud', 'flaming_oil', 'oil', 'ice', 'Minedropper', 'paint', 'sand', 'smoke', 'spikes', 'sticky_foam', 'tear_gas'];
+                const droppedWeaponKeywords = ['Flame Cloud Ejector', 
+                                               'Flaming Oiol Jet', 
+                                               'Oil Jet', 
+                                               'Ice Dropper', 
+                                               'Minedropper', 
+                                               'Paint Sprayer', 
+                                               'Sand Dropper', 
+                                               'SmokeScreen', 
+                                               'Spike Dropper', 
+                                               'Sticky Foam Sprayer', 
+                                               'Tear Gas Dispenser'];
                 const isDroppedWeapon = droppedWeaponKeywords.some(keyword => realWeaponName.includes(keyword));
                 console.log("confirmFiringActionDialog: isDroppedWeapon: " , isDroppedWeapon);
                 console.log("confirmFiringActionDialog: weaponId: " , weaponId);

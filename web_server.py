@@ -1548,12 +1548,30 @@ def handle_game_maneuver():
             # Space-agnostic key normalizer cleanup before memory caching
             clean_ghost = {str(k).replace(' ', ''): v for k, v in ghost_node.items()}
             
+            # ── GHOST COORDINATE ALIGNMENT PATCH ──
+            # Explicitly cross-map keys so the frontend canvas drawing template can find them safely
+            if 'local_starting_x_qty' in clean_ghost and 'x' not in clean_ghost:
+                clean_ghost['x'] = clean_ghost['local_starting_x_qty']
+            elif 'x' in clean_ghost and 'local_starting_x_qty' not in clean_ghost:
+                clean_ghost['local_starting_x_qty'] = clean_ghost['x']
+
+            if 'local_starting_y_qty' in clean_ghost and 'y' not in clean_ghost:
+                clean_ghost['y'] = clean_ghost['local_starting_y_qty']
+            elif 'y' in clean_ghost and 'local_starting_y_qty' not in clean_ghost:
+                clean_ghost['local_starting_y_qty'] = clean_ghost['y']
+            
             cache_key = f"{game_id}-{username}"
             ACTIVE_PREVIEWS[cache_key] = clean_ghost # Update high-speed volatile cache
         
             return jsonify({
                 "status": "success",
-                "ghost": clean_ghost
+                "ghost": {
+                    "x": clean_ghost['local_starting_x_qty'],
+                    "y": clean_ghost['local_starting_y_qty'],
+                    "orientation": clean_ghost['orientation'],
+                    # 🛠️ FIX: Ensure this exact property string is defined and sent down!
+                    "maneuver_preview_type": maneuver
+                }
             }), 200
 
     except Exception as e:
@@ -2256,57 +2274,6 @@ def get_game_state(game_id):
     except Exception as e:
         print(f"Error processing automated game state evaluation loop: {e}")
         return jsonify({'success': False, 'error': 'Internal server loop calculation failure'}), 500
-
-#//    try:
-#//        game_dir = game_dir_path(game_id)
-#//        if not os.path.isdir(game_dir):
-#//            return jsonify({"success": False, "error": "Match room data not found."}), 404
-
-#//        game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
-
-#//        if not game_files:
-#//            return jsonify({"success": False, "error": "Match room data not found."}), 404
-        
-
-#//        filepath = os.path.join(game_dir, game_files[-1])
-#//        raw_records = GameEngine.read_game_file(filepath)
-
-#//        if not raw_records:
-#//            return jsonify({"success": False, "error": "Game log database file is empty."}), 500
-
-#//        # Replicate MapRenderer's structural space-stripping rule across records
-#//        normalized_records = []
-#//        for entry in raw_records:
-#//            normalized_entry = {str(k).replace(' ', ''): v for k, v in entry.items()}
-#//            normalized_records.append(normalized_entry)
-
-#//        # Isolate the central metadata tracking block using clean keys
-#//        mq = next((r for r in normalized_records if r.get('MovementQueue') == 'MovementQueue'), {})
-
-#//        game_name_clean = str(mq.get('game_name', mq.get('gamename', 'Car Wars Arena')))
-#//        turn_qty = int(float(mq.get('turn_count', mq.get('turncount', 1))))
-#//        phase_qty = int(float(mq.get('phase', 1)))
-#//        #subphase_mode = str(mq.get('current_system_subphase', mq.get('current_system_subphase', 'Movement'))) phase_type: str = determine_game_subphase(game_files)
-#//        subphase_mode = determine_game_subphase(game_files)
-#//        active_driver = str(mq.get('active_player_turn', mq.get('active_player_turn', 'Player 1')))
-        
-#//        return jsonify({
-#//            "success": True,
-#//            "requires_turn_speed_selection": bool(mq.get('requires_turn_speed_selection', False)),
-#//            "queue": mq, # ── CRITICAL: The full MovementQueue block must be passed up to hydrate budgets!
-#//            "ticker_data": {
-#//                "game_name": game_name_clean,
-#//                "turn": turn_qty,
-#//                "phase": phase_qty,
-#//                "mode": subphase_mode,
-#//                "active_player": active_driver
-#//            },
-#//            "cars": [r for r in normalized_records if r.get('CarPosition') == 'CarPosition'],
-#//            "ghosts": [r for r in normalized_records if r.get('ProposedCarPosition') == 'ProposedCarPosition']
-#//        })
-#//
-#//    except Exception as route_crash:
-#//        return jsonify({"success": False, "error": f"Internal pipeline crash: {str(route_crash)}"}), 500
 
 @app.route('/api/end_combat_subphase', methods=['POST'])
 def end_combat_subphase():
@@ -3016,6 +2983,7 @@ def api_deploy_dropped_weapon():
         if not weapon_profile:
             return jsonify({'error': f'Weapon profile "{weapon_name}" not found in database blueprints.'}), 444
 
+        weapon_x_size, weapon_y_size = get_base64_image_size(base64_string=weapon_profile.get('base64_data', ""))
         # 2. Grab the latest phase file path for this match room
         game_dir = game_dir_path(game_id)
         all_files = os.listdir(game_dir)
@@ -3050,33 +3018,7 @@ def api_deploy_dropped_weapon():
         ax_dropped = 0.0
         ay_dropped = 0.0
 
-        match facing:
-            case "Front":
-                # Project forward along heading vector
-                ax_dropped = ax + distance * math.sin(angle_rad)
-                ay_dropped = ay - distance * math.cos(angle_rad)
-            case "Back":
-                ax_dropped, ay_dropped = project_destination(orientation=attacker['orientation'], x0=ax, y0=ay, x_size=21, y_size=21)
-                # Combines a "move backward" offset and a "move left" offset, both,
-                # scaled by `distance` (half the car's width) -- places the dropped
-                # item at the trailing corner, not centered on the rear edge.
-                # Verified: reproduces the orientation=180 test case exactly, and
-                # the offset magnitude stays constant at every rotation angle.
-                #ax_dropped = ax #- distance * (math.sin(angle_rad) + math.cos(angle_rad))
-                #ay_dropped = ay #+ distance * (math.cos(angle_rad) - math.sin(angle_rad))
-            case "Right":
-                # Shift 90 degrees clockwise to drop from right side panel
-                ax_dropped = ax + distance * math.cos(angle_rad)
-                ay_dropped = ay + distance * math.sin(angle_rad)
-            case "Left":
-                # Shift 90 degrees counter-clockwise to drop from left side panel
-                ax_dropped = ax - distance * math.cos(angle_rad)
-                ay_dropped = ay - distance * math.sin(angle_rad)
-            case "Top":
-                pass
-            case "Bottom":
-                pass
-        
+        ax_dropped, ay_dropped = project_destination(facing=facing, orientation=attacker['orientation'], x0=ax, y0=ay, x_size=weapon_x_size, y_size=weapon_y_size)
 
         # 4. Construct the persistent dropped weapon object ledger dictionary block
         dropped_entry = {
@@ -3101,12 +3043,14 @@ def api_deploy_dropped_weapon():
         print(f"[DROPPED WEAPON ERROR] Pipeline crash: {e}")
         return jsonify({'error': f'Internal server synchronization calculation error: {str(e)}'}), 500
 
-def project_destination(orientation, x0, y0, x_size=21, y_size=21, car_w=21, car_l=41):
+def project_destination(facing, orientation, x0, y0, x_size=21, y_size=21, car_w=21, car_l=41):
     """
     Calculates dropped weapon layout placement coordinates flush behind the car's bumper.
     Corrected rotation signs to place the weapon directly NORTH (above) the car at 180°.
     """
     GRID_SCALE = 41.0
+    x_new = 0.0
+    y_new = 0.0
     
     # 1. Convert all pixel measurements into uniform grid fractions
     car_w_grid = car_w / GRID_SCALE  # ≈ 0.5122
@@ -3119,91 +3063,71 @@ def project_destination(orientation, x0, y0, x_size=21, y_size=21, car_w=21, car
     car_center_x = x0 + (car_w_grid / 2.0)
     car_center_y = y0 + (car_l_grid / 2.0)
 
-    distance = ((car_l - 1) / 2 + (y_size - 1) / 2) / 40
+    # Right vector (perpendicular to forward, 90 deg clockwise)
+    rgt_x = math.cos(heading_rad)
+    rgt_y = math.sin(heading_rad)
 
-    x_new = car_center_x - (distance * math.sin(heading_rad)) # subtracting flips the angle 180 degrees
-    y_new = car_center_y + (distance * math.cos(heading_rad)) # subtracting flips the angle 180 degrees
-        
+    match (facing):
+        case "Front":
+            distance = ((car_l - 1) / 2 - (y_size - 1) / 2) / 40
+            x_new = car_center_x - (distance * math.sin(heading_rad)) # subtracting flips the angle 180 degrees
+            y_new = car_center_y + (distance * math.cos(heading_rad)) # subtracting flips the angle 180 degrees
+        case "Back":
+            distance = ((car_l - 1) / 2 + (y_size - 1) / 2) / 40
+            x_new = car_center_x - (distance * math.sin(heading_rad)) # subtracting flips the angle 180 degrees
+            y_new = car_center_y + (distance * math.cos(heading_rad)) # subtracting flips the angle 180 degrees
+        case "Left":
+            # 1/2 weapon height towards the back of the car
+            backward_distance = ((y_size -1) / 2) / 40.0
+            # 1/2 car width + 1/2 weapon width shifted out to the left (-1.0 multiplier)
+            outward_distance = (((car_w-1) / 2) + ((x_size -1) / 2)) / 40.0
+            
+            # Step back along heading, then step left perpendicular to heading
+            x_new = car_center_x - (backward_distance * math.sin(heading_rad)) - (outward_distance * rgt_x)
+            y_new = car_center_y + (backward_distance * math.cos(heading_rad)) - (outward_distance * rgt_y)
+        case "Right":
+            # 1/2 weapon height towards the back of the car
+            backward_distance = (y_size / 2) / 40.0
+            # 1/2 car width + 1/2 weapon width shifted out to the right (+1.0 multiplier)
+            outward_distance = ((car_w / 2) + (x_size / 2)) / 40.0
+            
+            # Step back along heading, then step right perpendicular to heading
+            x_new = car_center_x - (backward_distance * math.sin(heading_rad)) + (outward_distance * rgt_x)
+            y_new = car_center_y + (backward_distance * math.cos(heading_rad)) + (outward_distance * rgt_y)
+        case "Top":
+            # 1/2 weapon height towards the back of the car
+            backward_distance = (y_size / 2) / 40.0
+            x_new = car_center_x - (backward_distance * math.sin(heading_rad))
+            y_new = car_center_y + (backward_distance * math.cos(heading_rad))
+        case "Bottom":
+            backward_distance = (y_size / 2) / 40.0
+            x_new = car_center_x - (backward_distance * math.sin(heading_rad))
+            y_new = car_center_y + (backward_distance * math.cos(heading_rad))
     return round(x_new, 4), round(y_new, 4)
 
-"""
-def project_destination(orientation, x0, y0, x_size=21, y_size=21, car_w=21, car_l=41):
-    """ """
-    Calculates the top-left placement coordinates for a dropped weapon based on the car's orientation.
-    Supports dynamic sizing for different dropped payloads (mines, spikes, oil slicks).
+def get_base64_image_size(base64_string):
+    """
+    Decodes a base64 string and returns a tuple of its dimensions (width, height).
+    Handles both raw strings and data URI strings (e.g., 'data:image/png;base64,...')
+    """
+    try:
+        # Clean up the string if it contains a Data URI prefix
+        if "," in base64_string:
+            base64_string = base64_string.split(",")[1]
+            
+        # Decode the base64 string into raw image bytes
+        image_bytes = base64.b64decode(base64_string)
+        
+        # Open the bytes as a file-like object using BytesIO
+        with Image.open(BytesIO(image_bytes)) as img:
+            # Extract width and height
+            width, height = img.size
+            return width, height
+            
+    except Exception as e:
+        print(f"Error parsing image size: {e}")
+        return 0, 0
     
-    Assumes standard canvas space where Y increases DOWNWARDS and 0 degrees points RIGHT.
-    
-    :param orientation: Heading of the vehicle in degrees (e.g., 180, 135)
-    :param x0, y0: The current bounding box corner provided by the layout test
-    :param car_w, car_l: Dimensions of the car sprite/counter (width across, length bumper-to-bumper)
-    :param weapon_w, weapon_h: Dimensions of the dropped weapon bounding box
-    """ """
-    # 1. Convert heading to standard navigation radians
-    heading_rad = math.radians(orientation)
-    cos_h = math.cos(heading_rad)
-    sin_h = math.sin(heading_rad)
-    
-    # 2. Find the Absolute Car Center
-    # Bounded image boxes scale evenly around the sprite's rotation center
-    car_center_x = x0 + (car_w / 2.0)
-    car_center_y = y0 + (car_l / 2.0)
-    
-    # 3. Locate the Back-Right Corner Relative to Car Heading
-    # From the center point, we track backward (half length) and rightward (half width)
-    half_len = car_l / 2.0
-    half_wid = car_w / 2.0
-    
-    # Local directional vectors:
-    # Forward along chassis = (cos_h, sin_h)
-    # Right side of chassis  = (-sin_h, cos_h)
-    back_right_x = car_center_x - (half_len * cos_h) + (half_wid * -sin_h)
-    back_right_y = car_center_y - (half_len * sin_h) + (half_wid * cos_h)
-    
-    # 4. Project the Dropped Weapon's Middle Point
-    # The item clears the rear chassis. We shift the weapon's center out from the corner.
-    offset_distance = y_size / 2.0
-    
-    weapon_center_x = back_right_x - (offset_distance * cos_h)
-    weapon_center_y = back_right_y - (offset_distance * sin_h)
-    
-    # 5. Convert Weapon Center back to its Bounding Box Top-Left Corner
-    # This allows the renderer to plot the sprite box correctly without breaking alignment
-    final_x = weapon_center_x - (x_size / 2.0)
-    final_y = weapon_center_y - (y_size / 2.0)
-    
-    return round(final_x, 4), round(final_y, 4)
-"""
-
-"""
-def project_destination(orientation, x0, y0, x_size, y_size):
-    # 1. Establish the precise displacement vector that yields (12.0, 1.75) at 180°
-    # target_x - x0 = 12.0 - 12.1893 = -0.1893
-    # target_y - y0 = 1.75 - 2.0355 = -0.2855
-    base_vx = 0.25
-    base_vy = 0.25
-    shift_length = math.sqrt(0.25 ** 2 + 0.25 ** 2)#only true for 1/2X1/2 squares
-    
-    # 2. Determine how many degrees the car has turned away from its 180° baseline
-    delta_bearing = orientation - 135
-    delta_rad = math.radians(delta_bearing)
-    
-    # 3. Apply a standard 2D rotation matrix for your clockwise navigation space
-    cos_t = math.cos(delta_rad)
-    sin_t = math.sin(delta_rad)
-    
-    rotated_vx = shift_length * cos_t
-    rotated_vy = shift_length * sin_t
-    
-    # 4. Project from the raw layout entry point
-    final_x = x0 + rotated_vx
-    final_y = y0 - rotated_vy
-    
-    #final_x = x0 + base_vx
-    #final_y = y0 - base_vy
-    
-    return round(final_x, 4), round(final_y, 4) """
-
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':   
