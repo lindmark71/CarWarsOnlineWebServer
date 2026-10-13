@@ -312,7 +312,7 @@ def build_combat_queue(players: list, game_dir_path: str) -> dict:
     queue_players = []
     for index, p in enumerate(players):
         username = p['username']
-        crew_weapons_list = extract_crew_and_weapons(index + 1, game_dir_path)
+        crew_weapons_list = extract_crew_and_weapons(p.get('position_number', index + 1), game_dir_path)
         
         queue_players.append({
             'username': username,
@@ -382,50 +382,20 @@ def process_end_of_turn_hc_recovery(car_record: dict) -> None:
         print(f"[EOT RECOVERY ERROR] Failed to compute handling recovery math: {e}")
 
 def extract_crew_and_weapons(player_number: int, game_dir_path: str) -> dict:
-    """Given a player number, find the vehicle design in the game directory and extract
-       the crew and list of all weapons"""
-    matching_files = glob.glob(os.path.join(game_dir_path, f"player_{player_number}_*.txt"))
-    filepath = matching_files[0]
-    return_dict: dict = {}
-
-    if not os.path.exists(filepath):
-        print(f'Phase file not found: {filepath}')
-        return return_dict
-
-    with open(filepath) as opened_file:
-        data = opened_file.readlines() #a car file is a single line of dictionary elements
-    #data is a python list with one element.  We need to convert it to a dictionary
-    cleaned_data =  data[0].strip().lstrip('[').rstrip(']').lstrip('{').rstrip('}')
-    pairs = cleaned_data.split(',')
-    design_dict: dict = {}
-    for pair in pairs:
-        key, value = pair.split(':')
-        clean_key = key.strip().strip("'\"")
-        clean_value = value.strip().strip("'\"")
-        design_dict[clean_key] = clean_value
-
-    #'self.crew_title_0': 'Driver', 
-    #'self.selected_sub_weapon_0_canvas': 'Minedropper',
-
-    crew_index = 0
-    weapon_index = 0
-    find_me_crew = f'self.crew_title_{crew_index}'
-    find_me_weapon = f'self.selected_sub_weapon_{weapon_index}_canvas'
-    while True:
-        if find_me_crew in design_dict:
-            crew_name = design_dict[find_me_crew]
-            return_dict[crew_name] = False
-            crew_index = crew_index + 1
-            find_me_crew = f'self.crew_title_{crew_index}'
-        else:
-            break
-    while True:
-        if find_me_weapon in design_dict:
-            weapon_name = design_dict[find_me_weapon]
-            return_dict[weapon_name] = False
-            weapon_index = weapon_index + 1
-            find_me_weapon = f'self.selected_sub_weapon_{weapon_index}_canvas'
-        else:
-            break
-
-    return return_dict
+    from game_engine import GameEngine
+    matches = glob.glob(os.path.join(game_dir_path, f"player_{player_number}_*"))
+    if not matches:
+        print(f'Player snapshot not found for player {player_number}')
+        return {}
+    recs = GameEngine.read_game_file(matches[0])
+    if not recs:
+        return {}
+    car = recs[0]
+    out = {m['title']: False for m in GameEngine.get_crew_roster(car)}
+    idx = 0
+    while f"self.selected_sub_weapon_{idx}_canvas" in car:
+        name = car.get(f"self.selected_sub_weapon_{idx}_canvas", "")
+        if name:
+            out[name] = False
+        idx += 1
+    return out

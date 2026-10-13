@@ -257,10 +257,27 @@ class GameEngine:
                         player['half_remaining'] = float(player['half_remaining'])
 
         return result
+    
+    @staticmethod
+    def latest_phase_file(game_dir: str) -> str:
+        """Latest T#P#[M|C].txt by (turn, phase, C-after-M). Returns '' if none."""
+        best, best_key = '', None
+        for f in os.listdir(game_dir):
+            m = re.match(r'^T(\d+)P(\d+)([MC]?)\.txt$', f)
+            if m:
+                key = (int(m.group(1)), int(m.group(2)), 1 if m.group(3) == 'C' else 0)
+                if best_key is None or key > best_key:
+                    best, best_key = f, key
+        return best
 
     @staticmethod
     def write_game_file(filepath: str, data: list) -> bool:
         """Writes a list of dicts back to a game file, one dict per line."""
+        n = sum(1 for e in data if isinstance(e, dict) and e.get('MovementQueue') == 'MovementQueue')
+        if n > 1:
+            import traceback
+            print(f"[DUPLICATE QUEUE] {n} MovementQueue entries going into {filepath}")
+            traceback.print_stack(limit=6)        
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 for entry in data:
@@ -277,7 +294,7 @@ class GameEngine:
         Deductions scale down sequentially, keeping multi-step turns alternating smoothly.
         """
         try:
-            game_dir = os.path.join(GAME_FOLDER, game_id)
+            game_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games', str(game_id))
             if not os.path.isdir(game_dir):
                 return False, "Could not identify active game state tracking directory"
     
@@ -290,7 +307,7 @@ class GameEngine:
             if not game_files:
                 return False, "No active game files found."
     
-            filepath = os.path.join(game_dir, game_files[-1])
+            filepath = os.path.join(game_dir, GameEngine.latest_phase_file(game_dir))
             game_records = cls.read_game_file(filepath)
     
             # 1. Locate the exact ghost node representing our CURRENT active step segment
@@ -353,7 +370,7 @@ class GameEngine:
         """
 
         # 1. Self-contained path composition to find the game folder
-        game_dir = os.path.join('./games', str(game_id).strip())
+        game_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games', str(game_id))
         if not os.path.isdir(game_dir):
             return False, f"Game state directory not found for ID: {game_id}"
 
@@ -361,8 +378,8 @@ class GameEngine:
         game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
         if not game_files:
             return False, "No active phase tracking logs found."
-            
-        filepath = os.path.join(game_dir, game_files[-1])
+
+        filepath = os.path.join(game_dir, GameEngine.latest_phase_file(game_dir))
         
         # 2. Read the tracking ledger file row-by-row and parse into dictionaries
         file_data = []
@@ -426,7 +443,7 @@ class GameEngine:
 
         final_x = anchor_x / 40.0
         final_y = anchor_y / 40.0
-                
+
         # 4. Construct the transient ghost node atom completely in RAM
         ghost_node = {
             'ProposedCarPosition': 'ProposedCarPosition',
@@ -719,26 +736,15 @@ class GameEngine:
         and triggers a phase progression check if everyone is done.
         """
         # 1. Establish your absolute workspace paths (adjust to match your app structure)
-        GAME_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games', str(game_id))
+        game_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games', str(game_id))
         
-        if not os.path.exists(GAME_DIR):
-            print(f"[ENGINE ERROR] Game directory not found at: {GAME_DIR}")
-            return False
-
-        # 2. Grab all txt files matching your pattern to find the current active file
-        all_files = os.listdir(GAME_DIR)
-        game_files = sorted(
-            [f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')],
-            key=lambda f: os.path.getmtime(os.path.join(GAME_DIR, f))
-        )
-
-        if not game_files:
-            print(f"[ENGINE ERROR] No active state tracking files found in {GAME_DIR}")
+        if not os.path.exists(game_dir):
+            print(f"[ENGINE ERROR] Game directory not found at: {game_dir}")
             return False
 
         # Target the absolute latest file by timestamp (e.g., 'T1P1C.txt')
-        current_filename = game_files[-1]
-        current_filepath = os.path.join(GAME_DIR, current_filename)
+        current_filename = GameEngine.latest_phase_file(game_dir=game_dir)
+        current_filepath = os.path.join(game_dir, current_filename)
 
         # 3. Read and parse the current active state data payload
         try:
@@ -832,3 +838,4 @@ class GameEngine:
             message = f"[FILE LOCK ERROR] Could not clone state mapping definitions to next phase path: {e}"
             print(message)
             return False, message
+

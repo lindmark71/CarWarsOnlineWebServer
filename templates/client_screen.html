@@ -2798,6 +2798,7 @@
         const POLL_INTERVAL_MS = 5000;   // check every 5 seconds
         let   pollTimer        = null;
         let   lastKnownMtime   = null;
+        let lastFollowedServerFile = null;
 
         // ── Master Dual-Channel Auto-Refresh Polling ───────────────────────
         function stopPolling() {
@@ -2811,13 +2812,15 @@
         function startPolling(filename, gameId = null) {
             stopPolling(); // Safely clear out any lingering timers
             if (!filename) return;
-        
+            console.log("2815 [startPolling] ")
             // Track state locally to ensure we only prompt the dialog ONCE per turn transition
             let speedDialogPromptedThisPhase = false;
+            console.log("2818 [startPolling] ")
         
             pollTimer = setInterval(async () => {
                 try {
                     // Channel 1: Query the file system for image-re-rendering triggers
+                    console.log("2823 [startPolling] ")
                     const timestampUrl = gameId
                         ? `/game_file_timestamp/${encodeURIComponent(gameId)}/${encodeURIComponent(filename)}`
                         : `/map_file_timestamp/${encodeURIComponent(filename)}`;
@@ -2837,15 +2840,23 @@
                             speedDialogPromptedThisPhase = false;
                         }
                     }
+                    console.log("2843 [startPolling] ")
         
                     // Channel 2: Query the Flask endpoint for live player telemetry data
                     if (navState.gameId) {
+                        console.log("2847 [startPolling] ")
                         const stateResponse = await fetch(`/api/game_state/${navState.gameId}`);
-        
+                        console.log("[DEBUG] stateResponse: ", stateResponse)
                         if (stateResponse.ok) {
-                            const gameStatePayload = await stateResponse.json();
+                            console.log("2851 [startPolling] ")
+                            const gameStatePayload = await stateResponse.json(); //phase_type
+                            console.log("[DEBUG] gameStatePayload.phase_type: ", gameStatePayload.phase_type)
         
+                            console.log("2855 [startPolling] ")
+                            console.log("2856 [startPolling] gameStatePayload.success: ", gameStatePayload.success)
+                            console.log("2857 [startPolling] gameStatePayload.ticker_data: ", gameStatePayload.ticker_data)
                             if (gameStatePayload.success && gameStatePayload.ticker_data) {
+                                console.log("2857 [startPolling] ")
                                 const tk = gameStatePayload.ticker_data;
                                 console.log("startPolling: value of tk.mode: ", tk.mode)
                                 togglePhaseControls(tk.mode, tk.active_player);
@@ -2860,15 +2871,38 @@
                                 if (navLabel) {
                                     navLabel.textContent = `Turn ${tk.turn}, Phase ${tk.phase} (${tk.mode})`;
                                 }
-        
+                                
+                                // ── Open the new-turn speed dialog when the server says this player must choose ──
+                                console.log("2874 [startPolling] ")
+                                if (gameStatePayload.speed_dialog && !speedDialogPromptedThisPhase) {
+                                    console.log("2876 [startPolling] ")
+                                    speedDialogPromptedThisPhase = true;
+                                    openNewTurnSpeedDialog(gameStatePayload.speed_dialog);
+                                }
+                                console.log("2880 [startPolling] ")
+                                
                                 // Target your newly injected HUD display wrapper block
                                 const hudElement = document.getElementById('live-movement-hud');
+
                                 const rawQueueNode = gameStatePayload.queue || {};
                                 
                                 if (hudElement) {
                                     // Optional: If you have logic to hydrate your movement HUD from the queue, place it here.
                                 }
                             }
+                            // Channel 3: follow the server to a newly created phase file (e.g. T1P1C -> T1P2M)
+                            const serverFile = gameStatePayload.current_file;
+                            if (gameStatePayload.success && serverFile && serverFile !== filename &&
+                                serverFile !== lastFollowedServerFile) {
+                                const viewingLatest = navState.files.length === 0 ||
+                                    navState.currentIndex === navState.files.length - 1;
+                                if (viewingLatest) {              // don't yank someone who is browsing history
+                                    lastFollowedServerFile = serverFile;
+                                    console.log(`New phase file detected: ${filename} -> ${serverFile}`);
+                                    await loadGameFileList(navState.gameId);   // reloads the list, jumps to newest, restarts polling
+                                    return;
+                                }
+                            }                            
                         } // End of stateResponse.ok check
                     } // End of navState.gameId check
         
@@ -3874,14 +3908,15 @@
                 console.log("confirmFiringActionDialog: realWeaponName: " , realWeaponName);
                 console.log("confirmFiringActionDialog: facingDirection: " , facingDirection);
                 
-
                 if (isDroppedWeapon && realWeaponName !== "none") {
-                    // Fire the deployment pipeline with the selected weapon string name
-                    handleDroppedWeaponDeployment(realWeaponName, facingDirection);
-    
-                    // Clean up UI: Close the dialog modal out of focus safely
-                    closeFiringActionDialog(); 
-                    return; // Stop execution early so it doesn't double-fire standard attacks
+                    const droppedCrewId = document.querySelector('input[name="firingCrew"]:checked')?.value;
+                    if (!droppedCrewId) {
+                        alert("Please select an operational crew member first.");
+                        return;
+                    }
+                    handleDroppedWeaponDeployment(realWeaponName, facingDirection, droppedCrewId, weaponId);
+                    closeFiringActionDialog();
+                    return;
                 }
             }
 
@@ -4380,7 +4415,7 @@
             }
         }
 
-        async function handleDroppedWeaponDeployment(weaponName, facingDirection) {
+        async function handleDroppedWeaponDeployment(weaponName, facingDirection, crewId, weaponId) {
             if (!navState.gameId) {
                 console.error("No active Game ID found for deployment.");
                 return;
@@ -4396,7 +4431,9 @@
                     body: JSON.stringify({
                         game_id: navState.gameId,
                         weapon_name: weaponName,
-                        facing: facingDirection
+                        facing: facingDirection,
+                        crew_id: crewId,
+                        weapon_id: weaponId
                     })
                 });
         

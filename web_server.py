@@ -22,6 +22,8 @@ import database as db
 import secrets
 from game_engine import GameEngine 
 from game_tables import resolve_control_check, SPEED_CONTROL, CONTROL_TABLE, CONTROL_COLUMNS
+from collision import car_footprint, find_wall_collisions
+from game_tables import get_speed_control
 
 app = Flask(__name__)
 
@@ -291,6 +293,11 @@ def write_game_file(filepath: str, data: list) -> bool:
     Write a list of dicts back to a game file,
     one dict per line, matching the format map_designer.py produces.
     """
+    n = sum(1 for e in data if isinstance(e, dict) and e.get('MovementQueue') == 'MovementQueue')
+    if n > 1:
+        import traceback
+        print(f"[DUPLICATE QUEUE] {n} MovementQueue entries going into {filepath}")
+        traceback.print_stack(limit=6)  
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             for entry in data:
@@ -1540,6 +1547,7 @@ def handle_game_maneuver():
         
         success, result_data = GameEngine.process_player_movement(game_id, username, maneuver)
         if not success:
+            print(f"[MANEUVER 400] game={game_id} user={username} maneuver={maneuver} -> {result_data}")
             return jsonify({"error": result_data}), 400
         
         ghost_node = result_data # Catch the dictionary object
@@ -1626,7 +1634,7 @@ def handle_game_confirm_move():
     if not game_files:
         return jsonify({'error': f'No active game state tracking files found for ID: {game_id}'}), 404
         
-    filepath = os.path.join(game_dir, game_files[-1])
+    filepath = os.path.join(game_dir, GameEngine.latest_phase_file(game_dir))
 
     try:
         file_data = read_game_file(filepath)
@@ -1732,6 +1740,7 @@ def handle_game_confirm_move():
                         except Exception as hc_err:
                             print(f"[HC UPDATE ERROR] Failed executing raw file subtraction parse: {hc_err}")
 
+        hits = []
         # ── 4. STAGE INTEGRATION LOCKDOWN: APPLY UNIFIED REAR-PIVOT SWING ALGORITHM ── 🛠
         cache_key = f"{game_id}-{username}"
         ghost_node = ACTIVE_PREVIEWS.get(cache_key)
@@ -1796,7 +1805,17 @@ def handle_game_confirm_move():
                 file_data[car_idx]['heading'] = int(round(ghost_heading))
                 
                 print(f"[SYNC SUCCESS] Locked permanent coordinates to match rendering matrix layout points.")
-
+                car = file_data[car_idx]
+                hits = find_wall_collisions(car_footprint(car['local_starting_x_qty'], car['local_starting_y_qty'], car['orientation']), file_data)
+                if hits:
+                    speed = int(float(car.get('current_speed', 0)))
+                    file_data.append({
+                        'CollisionRecord': 'CollisionRecord', 'owner': username,
+                        'round': queue_entry['round'], 'phase': queue_entry['phase'],
+                        'maneuver': maneuver, 'speed': speed,
+                        'ram': get_speed_control(speed)['ram'],     # e.g. '7d' -- recorded, not rolled
+                        'hits': hits, 'resolved': False})
+    
             # Flush volatile preview cache maps out of memory registers safely
             ACTIVE_PREVIEWS.pop(cache_key, None)
             print(f"[CACHE FLASH CONCLUDED] Volatile cache released for key: {cache_key}")
@@ -1804,53 +1823,6 @@ def handle_game_confirm_move():
         else:
             # Fallback traditional increment deduction loop if direct lookups return empty
             player['full_remaining'] = max(0, int(player.get('full_remaining', 1)) - 1)
-
-
-#        # ── 4. STAGE INTEGRATION LOCKDOWN: SYNCHRONIZE METRICS FROM IN-MEMORY GHOST CACHE ── 🛠
-#        cache_key = f"{game_id}-{username}"
-#        
-#        # Pull the data properties completely from your memory grid arrays
-#        ghost_node = ACTIVE_PREVIEWS.get(cache_key)
-#
-#        if ghost_node:
-#            for idx, entry in reversed(list(enumerate(file_data))):
-#                if (entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username):
-#                    
-#                    # ── CORRECTED MAPPING LAYER ──
-#                    # 1. Harvest raw values safely from your temporary preview node
-#                    raw_x = ghost_node.get('local_starting_x_qty') or ghost_node.get('x') or ghost_node.get('ghost_x')
-#                    raw_y = ghost_node.get('local_starting_y_qty') or ghost_node.get('y') or ghost_node.get('ghost_y')
-#                    raw_heading = ghost_node.get('heading') or ghost_node.get('ghost_heading')
-#                    raw_orientation = ghost_node.get('orientation') or ghost_node.get('ghost_orientation') or ghost_node.get('heading')
-#
-#                    # 2. Force absolute numeric conversions to strip away string concatenation bugs
-#                    if raw_x is not None: 
-#                        file_data[idx]['local_starting_x_qty'] = float(raw_x)
-#                    if raw_y is not None: 
-#                        file_data[idx]['local_starting_y_qty'] = float(raw_y)
-#                    if raw_heading is not None: 
-#                        file_data[idx]['heading'] = int(round(float(raw_heading)))
-#                    if raw_orientation is not None: 
-#                        file_data[idx]['orientation'] = int(round(float(raw_orientation)))
-#                    
-#                    
-#                    print(f"[MUTATION SUCCESS] Copied Ghost parameters into CarPosition for {username} -> X: {raw_x}, Y: {raw_y}, Orientation: {raw_orientation}")
-#                    break 
-#
-#                    #file_data[idx]['local_starting_x_qty'] = ghost_node.get('local_starting_x_qty')
-#                    #file_data[idx]['local_starting_y_qty'] = ghost_node.get('local_starting_y_qty')
-#                    #file_data[idx]['heading'] = ghost_node.get('heading')
-#                    #file_data[idx]['orientation'] = ghost_node.get('orientation')
-#                    #break # Here is where we update the local file_data memory of the game file
-#            
-#            # Flush the memory token after database confirmation serialization loops close
-#            ACTIVE_PREVIEWS.pop(cache_key, None)
-#            print(f"[CACHE FLASH CONCLUDED] RAM memory tracking array released for key: {cache_key}")
-#            
-#        else:
-#            # Fallback traditional increment deduction loop if direct lookups return empty
-#            player['full_remaining'] = max(0, int(player.get('full_remaining', 1)) - 1)
-
 
         # Turn progression update markers
         player['moved_this_segment'] = True
@@ -1926,7 +1898,8 @@ def handle_game_confirm_move():
         return jsonify({'message': f'{username} moved: {maneuver}',
                         'queue': queue_entry,
                         'move_record': move_record,
-                        'phase_complete': queue_entry['complete']}), 200
+                        'phase_complete': queue_entry['complete'],
+                        'collision': bool(hits)}), 200
     except Exception as e:
         print(f'Error confirming move segment: {e}')
         return jsonify({'error': 'Failed to confirm move updates.'}), 500
@@ -2100,37 +2073,25 @@ def check_my_turn(game_id):
         print(f'Error checking turn: {e}')
         return jsonify({'error': 'Failed to check turn'}), 500
     
-def build_and_write_movement_queue(game_id: str, game_name: str, phase: int) -> bool:
-    """
-    Read the current phase file, extract CarPosition entries to get
-    player speeds, build the movement queue, append it to the file,
-    and write it back.
-    """
-    from game_tables import build_movement_queue
-    from game_tables import build_combat_queue
+def build_and_write_movement_queue(game_id: str, game_name: str, phase: int, turn: int = 1) -> bool:
+    from game_tables import build_movement_queue, build_combat_queue
 
-    filename = f'T{1}P{phase}M.txt'  # always turn 1 for now
-    filepath = os.path.join(game_dir_path(game_id), filename)
-
+    filepath = os.path.join(game_dir_path(game_id), f'T{turn}P{phase}M.txt')
     if not os.path.exists(filepath):
         print(f'Phase file not found: {filepath}')
         return False
-
     data = read_game_file(filepath)
     if not data:
         return False
 
-    players = []
-    for entry in reversed(data):
-        normalized_entry = {str(k).replace(' ', ''): v for k, v in entry.items()}
-        if normalized_entry.get('CarPosition') == 'CarPosition':
-            players.append({
-                'username': normalized_entry.get('owner', ''),
-                'current_speed': int(normalized_entry.get('current_speed', 0))
-            })
-        else: # As this function is called, the CarPosition entries shall be the last entries.  Once we find an entry that isn't a CarPosition, we can afford to stop looking
-            break
-
+    players, seen = [], set()
+    for entry in reversed(data):   # newest first, one entry per owner
+        n = {str(k).replace(' ', ''): v for k, v in entry.items()}
+        if n.get('CarPosition') == 'CarPosition' and n.get('owner') not in seen:
+            seen.add(n.get('owner'))
+            players.append({'username': n.get('owner', ''),
+                'current_speed': int(float(n.get('current_speed', 0))),
+                'position_number': n.get('player_number')})
     if not players:
         print(f'No CarPosition entries found in {filepath}')
         return False
@@ -2138,16 +2099,16 @@ def build_and_write_movement_queue(game_id: str, game_name: str, phase: int) -> 
     queue = build_movement_queue(players, phase)
     queue['current_system_subphase'] = 'Movement'
     queue['game_name'] = game_name
-    queue['turn_count'] = 1
-    if queue.get('players') and len(queue['players']) > 0:
+    queue['turn_count'] = turn
+    queue['round'] = turn
+    queue['complete'] = False
+    if queue.get('players'):
         queue['active_player_turn'] = queue['players'][0]['username']
 
-    data = [e for e in data if str(list(e.keys())).replace(' ', '') != 'MovementQueue']
+    data = [e for e in data
+            if e.get('MovementQueue') != 'MovementQueue' and e.get('CombatQueue') != 'CombatQueue']
     data.append(queue)
-
-    combat_queue = build_combat_queue(players, game_dir_path(game_id))
-    data.append(combat_queue)
-
+    data.append(build_combat_queue(players, game_dir_path(game_id)))
     return write_game_file(filepath, data)
 
 def determine_game_subphase(file_list: list) -> str:
@@ -2192,89 +2153,89 @@ def determine_game_subphase(file_list: list) -> str:
     else:
         return "Movement"
     
+def get_car_speed_limits(game_id: str, username: str):
+    """(current_speed, top_speed, max_accel) or None."""
+    game_dir = game_dir_path(game_id)
+    latest = GameEngine.latest_phase_file(game_dir)
+    if not latest:
+        return None
+    recs = read_game_file(os.path.join(game_dir, latest))
+    car = next((r for r in reversed(recs)
+                if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
+    if not car:
+        return None
+
+    current = int(float(car.get('current_speed', 0)))
+    top = int(float(car.get('top_speed', 90)))
+
+    accel = 5
+    player = next((p for p in db.get_game_players(game_id) if p['username'] == username), None)
+    if player:
+        snap = os.path.join(game_dir, f"player_{player['position_number']}_{player['design']}")
+        if os.path.exists(snap):
+            srec = GameEngine.read_game_file(snap)
+            if srec:
+                for key in ('acceleration', 'accel', 'max_accel'):   # GUESS: real key name unknown
+                    if key in srec[0]:
+                        accel = GameEngine.to_int(srec[0][key], default=5)
+                        break
+    return current, top, accel
+
+
 @app.route('/api/game_state/<game_id>')
 def get_game_state(game_id):
-    """
-    Locates the active match's directory, enforces MapRenderer space-stripping 
-    key normalization rules to prevent property mismatches, and updates the UI ticker.
-    """
     game_id = str(game_id).strip()
     username = session.get('username')
-    
-    # 1. Establish your absolute folder framework
     game_dir = game_dir_path(game_id)
-    if not os.path.exists(game_dir):
+    if not os.path.isdir(game_dir):
         return jsonify({'success': False, 'error': 'Game session directory not found'}), 404
 
     try:
-        # 2. Gather tracking files sorted chronologically by modification time
-        all_files = os.listdir(game_dir)
-        game_files = sorted(
-            [f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')],
-            key=lambda f: os.path.getmtime(os.path.join(game_dir, f))
-        )
-
-        if not game_files:
+        latest = GameEngine.latest_phase_file(game_dir)
+        m = re.match(r'^T(\d+)P(\d+)([MC]?)\.txt$', latest or '')
+        if not m:
             return jsonify({'success': False, 'error': 'No tracking state files found'}), 404
 
-        # Read the absolute latest active game tracking ledger file
-        current_filename = game_files[-1]
-        current_filepath = os.path.join(game_dir, current_filename)
+        turn, phase, suffix = int(m.group(1)), int(m.group(2)), m.group(3)
+        records = GameEngine.read_game_file(os.path.join(game_dir, latest))
+        mq = next((r for r in reversed(records)
+                   if r.get('MovementQueue') == 'MovementQueue'), {})
 
-        phase_records = GameEngine.read_game_file(current_filepath)
+        pending = mq.get('speed_pending', [])
+        if pending:
+            mode = 'Speed Selection'
+        elif suffix == 'C':
+            mode = 'Combat'
+        else:
+            mode = 'Movement'
 
-        # 3. STATE MACHINE CLASSIFIER: Determine context based on suffix patterns
-        # Suffix rules: 'M' = Movement Phase, 'C' = Combat Phase
-        is_combat_phase = current_filename.endswith('C.txt')
-        is_movement_phase = current_filename.endswith('M.txt')
+        # Combat is simultaneous: every player may act
+        active = username if mode == 'Combat' else mq.get('active_player_turn', '')
 
-        # 4. ACTIVE COMBAT EVALUATION LAYER
-        if is_combat_phase:
-            # Count how many cars are registered as active participants but haven't acted yet
-            cars_needing_combat_actions = [
-                car for car in phase_records
-                if isinstance(car, dict) and (car.get('CarPosition') == 'CarPosition' or 'username' in car)
-                if not car.get('firing_action_taken', False) and car.get('status') != 'action_completed'
-            ]
-            
-            # 5. ALL PARTICIPANTS ARE FINISHED -> MIGRATE FILE TO NEXT MOVEMENT PHASE
-            if len(cars_needing_combat_actions) == 0:
-                match = re.match(r'^T(\d+)P(\d+)C\.txt$', current_filename)
-                if match:
-                    turn_num = int(match.group(1))
-                    phase_num = int(match.group(2))
-                    
-                    # Compute next sequential sequence markers (e.g., Turn 1 Phase 1 Combat -> Turn 1 Phase 2 Movement)
-                    next_phase_num = phase_num + 1
-                    next_filename = f"T{turn_num}P{next_phase_num}M.txt" # Generates 'T1P2M.txt'
-                    next_filepath = os.path.join(game_dir, next_filename)
+        speed_dialog = None
+        if username in pending:
+            lim = get_car_speed_limits(game_id, username)
+            if lim:
+                speed_dialog = {'current_speed': lim[0], 'top_speed': lim[1], 'max_accel': lim[2]}
 
-                    # Only duplicate if the next phase record file slot doesn't exist yet
-                    if not os.path.exists(next_filepath):
-                        try:
-                            # Safely duplicate the finished combat file context over to the next movement slot
-                            shutil.copy2(current_filepath, next_filepath)
-                            print(f"🚀 [AUTO PROGRESSION SUCCESS]: All combat finished. Advanced: {current_filename} -> {next_filename}")
-                            
-                            # Switch context pointers to return the newly generated ledger state immediately
-                            current_filename = next_filename
-                            phase_records = GameEngine.read_game_file(next_filepath)
-                                
-                        except IOError as io_err:
-                            print(f"[FILE LOCK EXCEPTION] Could not run file generation cascade: {io_err}")
-
-        # Return the payload securely back to client frontend scripts
         return jsonify({
             'success': True,
-            'current_file': current_filename,
-            'phase_type': 'combat' if current_filename.endswith('C.txt') else 'movement',
-            'data': phase_records
+            'current_file': latest,
+            'phase_type': 'combat' if suffix == 'C' else 'movement',
+            'data': records,
+            'queue': mq,
+            'speed_dialog': speed_dialog,
+            'ticker_data': {
+                'game_name': mq.get('game_name', 'Car Wars'),
+                'turn': turn, 'phase': phase,
+                'mode': mode, 'active_player': active,
+            },
         }), 200
-
     except Exception as e:
-        print(f"Error processing automated game state evaluation loop: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': 'Internal server loop calculation failure'}), 500
-
+    
 @app.route('/api/end_combat_subphase', methods=['POST'])
 def end_combat_subphase():
     game_id = request.json.get('game_id')
@@ -2312,7 +2273,7 @@ def calculate_live_to_hit():
     if not game_files:
         return jsonify({"possible": False, "reason": "Match room data not found."})
  
-    filepath = os.path.join(game_dir, game_files[-1])
+    filepath = GameEngine.latest_phase_file(game_dir=game_dir)
     records = GameEngine.read_game_file(filepath)
  
     attacker = next((r for r in records if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
@@ -2609,7 +2570,7 @@ def get_firing_dialog_data():
         if not game_files:
             return jsonify({'error': 'No active game state file found'}), 404
 
-        phase_filepath = os.path.join(game_dir, game_files[-1])
+        phase_filepath = os.path.join(game_dir, GameEngine.latest_phase_file(game_dir))
         phase_records = GameEngine.read_game_file(phase_filepath)
 
         # Scan phase records to see if this user has already dropped a weapon asset this phase
@@ -2706,6 +2667,7 @@ def confirm_firing_action():
     crew_id = str(data.get('crew_id', '')).strip()
     weapon_id = str(data.get('weapon_id', '')).strip()
     username = session['username']
+    game_dir = game_dir_path(game_id)
 
     if not game_id or not crew_id or not weapon_id:
         return jsonify({'error': 'game_id, crew_id, and weapon_id are required'}), 400
@@ -2717,6 +2679,9 @@ def confirm_firing_action():
             pass_intercept = True
         else:
             pass_intercept = False
+
+        crew_title = None
+        fired_names = []
 
         if not pass_intercept:
             # ── STANDARD ACTIVE WEAPON SYSTEM PROCESSING ──
@@ -2731,7 +2696,7 @@ def confirm_firing_action():
                 return jsonify({'error': 'No design assigned for this player'}), 400
 
             snapshot_filename = f"player_{position_number}_{design}"
-            snapshot_path = os.path.join(game_dir_path(game_id), snapshot_filename)
+            snapshot_path = os.path.join(game_dir, snapshot_filename)
 
             if not os.path.exists(snapshot_path):
                 return jsonify({'error': f'Car snapshot file not found: {snapshot_filename}'}), 404
@@ -2782,50 +2747,60 @@ def confirm_firing_action():
             car_records[0] = car_record
             GameEngine.write_game_file(snapshot_path, car_records)
 
-        # ── 2. NEW AUTOMATED PROGRESSION OVERSIGHT CHECK ── ⚙️
-        game_dir = game_dir_path(game_id)
-        all_files = os.listdir(game_dir)
-        game_files = sorted([f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')])
-        
-        if game_files:
-            latest_filepath = os.path.join(game_dir, game_files[-1])
-            file_data = read_game_file(latest_filepath)
-            
-            # Isolate the central metadata tracking manager block
-            queue_entry = next((e for e in file_data if e.get('MovementQueue') == 'MovementQueue'), None)
-            
-            if queue_entry:
-                players_list = queue_entry.get('players', [])
-                current_mover = next((p for p in players_list if p['username'] == username), None)
-                
-                if current_mover:
-                    # Update local segment state tracking fields
-                    current_mover['done'] = True 
-                    current_mover['moved_this_segment'] = True
-                    
-                # Re-serialize state variations back into active layout records
-                for idx, entry in enumerate(file_data):
-                    if entry.get('MovementQueue') == 'MovementQueue':
-                        file_data[idx] = queue_entry
-                        break
-                write_game_file(latest_filepath, file_data)
+            crew_title = next(m["title"] for m in crew_roster if m["id"] == crew_id)
+            members = selected_link['members'] if selected_link else [weapon_id]
+            if selected_link:
+                members = [GameEngine._translate_row_id_to_position_id(m) for m in members]
+            fired_names = []
+            for aid in members:
+                if aid.startswith('accessory-'):
+                    nm = car_record.get(f"self.selected_accessory_{aid.split('-')[1]}", '')
+                else:
+                    nm, _ = GameEngine.get_weapon_facing_and_name(car_record, aid)
+                if nm:
+                    fired_names.append(nm)            
 
-                # Check if EVERY player in this lobby is finished with their action segment
-                all_combat_done = all(p.get('done', False) for p in players_list)
-                
-                if all_combat_done:
-                    print(f"[PHASE PROGRESSION] All combat options processed. Advancing from {game_files[-1]}...")
-                    from phase_manager import PhaseProgressionManager
-                    
-                    # Force automatic transition, skipping empty combat files to launch next phase movement
-                    success, log_msg = PhaseProgressionManager.advance_to_next_phase_or_turn(game_id)
-                    
-                    return jsonify({
-                        'message': f'Action updated. Phase complete! Engine shifted: {log_msg}',
-                        'phase_complete': True,
-                        'crew_id': crew_id,
-                        'weapon_id': weapon_id
-                    }), 200
+        # ── 2. NEW AUTOMATED PROGRESSION OVERSIGHT CHECK ── ⚙️
+        latest_filepath = GameEngine.latest_phase_file(game_dir=game_dir)
+        file_data = read_game_file(latest_filepath)
+
+
+        # ── 2. UPDATE THE COMBAT QUEUE, THEN CHECK FOR PHASE COMPLETION ──
+        game_dir = game_dir_path(game_id)
+        latest_name = GameEngine.latest_phase_file(game_dir)
+        if not latest_name.endswith('C.txt'):
+            return jsonify({'error': 'The game is not in a combat phase'}), 400
+        latest_filepath = os.path.join(game_dir, latest_name)
+        file_data = read_game_file(latest_filepath)
+
+        combat_queue = next((e for e in reversed(file_data)
+                             if e.get('CombatQueue') == 'CombatQueue'), None)
+        if combat_queue is None:
+            return jsonify({'error': 'No combat queue found in the current phase file'}), 404
+
+        for p in combat_queue.get('players', []):
+            if p['username'] == username:
+                cw = p.setdefault('crew_weapons_list', {})
+                if pass_intercept:
+                    p['passed'] = True
+                else:
+                    cw[crew_title] = True
+                    for nm in fired_names:
+                        cw[nm] = True
+                break
+
+        write_game_file(latest_filepath, file_data)
+
+        if combat_phase_complete(game_id, combat_queue):
+            from phase_manager import PhaseProgressionManager
+            success, log_msg = PhaseProgressionManager.advance_to_next_phase_or_turn(game_id)
+            return jsonify({'message': f'Combat complete. {log_msg}',
+                            'phase_complete': True,
+                            'crew_id': crew_id, 'weapon_id': weapon_id}), 200
+
+        return jsonify({'message': f'Action registered for {username}. Waiting for remaining players...',
+                        'phase_complete': False,
+                        'crew_id': crew_id, 'weapon_id': weapon_id}), 200
 
         # Return successfully if other players are still pending their combat choices
         return jsonify({
@@ -2846,105 +2821,98 @@ def confirm_firing_action():
 def confirm_turn_speed():
     data = request.get_json() or {}
     game_id = str(data.get('game_id', '')).strip()
-    speed_change = int(data.get('speed_change', 0))
     username = session['username']
-    
+    try:
+        speed_change = int(data.get('speed_change', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'speed_change must be a number'}), 400
+
     if not game_id:
         return jsonify({'error': 'game_id is required'}), 400
-        
+
     try:
-        # 1. Fetch player details to trace vehicle asset profiles and snapshot links
-        players = db.get_game_players(game_id)
-        player_entry = next((p for p in players if p['username'] == username), None)
+        player_entry = next((p for p in db.get_game_players(game_id)
+                             if p['username'] == username), None)
         if not player_entry:
             return jsonify({'error': 'You are not a player in this game'}), 404
-            
         position_number = player_entry.get('position_number')
         design = player_entry.get('design')
-        
-        # 2. Trace the current active layout file from the match folder array
+
         game_dir = game_dir_path(game_id)
-        game_files = sorted([f for f in os.listdir(game_dir) if re.match(r'^T\d+P', f) and f.endswith('.txt')])
-        if not game_files:
+        latest = GameEngine.latest_phase_file(game_dir)
+        if not latest:
             return jsonify({'error': 'No active turn documentation found.'}), 404
-            
-        active_filepath = os.path.join(game_dir, game_files[-1])
+        active_filepath = os.path.join(game_dir, latest)
         file_data = read_game_file(active_filepath)
-        
-        # 3. Target the live coordinate tracking CarPosition block and update metrics
-        car_node = next((r for r in file_data if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
+
+        queue = next((e for e in reversed(file_data)
+                      if e.get('MovementQueue') == 'MovementQueue'), None)
+        if queue is None:
+            return jsonify({'error': 'No movement queue found'}), 404
+
+        # Once per turn: only players the server is still waiting on may choose
+        pending = queue.get('speed_pending', [])
+        if username not in pending:
+            return jsonify({'error': 'You have already chosen your speed for this turn'}), 400
+
+        # Validate against the car's real limits
+        lim = get_car_speed_limits(game_id, username)
+        if lim is None:
+            return jsonify({'error': 'Car not found'}), 404
+        cur, top, accel = lim
+        new_speed = cur + speed_change
+        if (speed_change % 5 != 0 or speed_change < -45 or speed_change > accel
+                or new_speed < 0 or new_speed > top):
+            return jsonify({'error': 'That speed change is not allowed for this car'}), 400
+
+        car_node = next((r for r in reversed(file_data)
+                         if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
         if not car_node:
             return jsonify({'error': 'Car coordinate asset not found in turn database file'}), 404
-            
-        current_speed = int(float(car_node.get('current_speed', 0)))
-        new_speed = max(0, current_speed + speed_change)
         car_node['current_speed'] = new_speed
-        
-        # 4. RESOLVE TIRE RESTRUCTURING RULES (Car Wars p. 41 Damage Penalties)
-        # Damage applies directly to your specific snapshot files to decouple shared elements
-        tire_damage_applied = 0
+
+        # Hard-braking tire damage (Car Wars p. 41), applied to this player's snapshot
         damage_msg = ""
-        
-        if speed_change in [-35, -40, -45]:
-            snapshot_filename = f"player_{position_number}_{design}"
-            snapshot_path = os.path.join(game_dir, snapshot_filename)
-            
+        if speed_change in (-35, -40, -45):
+            snapshot_path = os.path.join(game_dir, f"player_{position_number}_{design}")
             if os.path.exists(snapshot_path):
                 car_records = GameEngine.read_game_file(snapshot_path)
                 if car_records and isinstance(car_records[0], dict):
-                    vehicle_snapshot = car_records[0]
-                    
-                    # Compute dynamic randomized parameters matching rule configurations
-                    if speed_change == -35:
-                        tire_damage_applied = 2
-                    elif speed_change == -40:
-                        tire_damage_applied = random.randint(1, 6)  # 1d
-                    elif speed_change == -45:
-                        tire_damage_applied = random.randint(1, 6) + 3  # 1d+3
-                        
-                    # Process deduction array sequences targeting vehicle tire components
-                    # (Assumes your vehicle architecture lists components like 'tire_lf', 'tire_rf', etc.)
-                    tire_keys = ['tire_lf', 'tire_rf', 'tire_lr', 'tire_rr']
-                    tires_modified = 0
-                    
-                    for tire in tire_keys:
-                        if tire in vehicle_snapshot:
-                            current_tire_hp = int(vehicle_snapshot.get(tire, 0))
-                            vehicle_snapshot[tire] = max(0, current_tire_hp - tire_damage_applied)
-                            tires_modified += 1
-                            
-                    if tires_modified > 0:
-                        # Save structural modifications back to disk storage paths
-                        car_records[0] = vehicle_snapshot
+                    snap = car_records[0]
+                    dmg = {-35: 2,
+                           -40: random.randint(1, 6),
+                           -45: random.randint(1, 6) + 3}[speed_change]
+                    modified = 0
+                    for tire in ('tire_lf', 'tire_rf', 'tire_lr', 'tire_rr'):
+                        if tire in snap:
+                            snap[tire] = max(0, int(snap.get(tire, 0)) - dmg)
+                            modified += 1
+                    if modified:
                         GameEngine.write_game_file(snapshot_path, car_records)
-                        damage_msg = f" Emergency braking hazard! Each tire took {tire_damage_applied} points of damage."
-                        print(f"[RULES ENGINE] Heavy deceleration penalty applied. {damage_msg}")
+                        damage_msg = f" Emergency braking hazard! Each tire took {dmg} points of damage."
 
-        # 5. RETRACT SPEED CHOICE UNLOCK TOKENS FROM METADATA
-        # Clears tracking variables so the intercept pop-up dismisses automatically across channels
-        for entry in file_data:
-            if entry.get('MovementQueue') == 'MovementQueue':
-                entry['requires_turn_speed_selection'] = False
-                break
-                
-        # Synchronize lists back into the master phase log matrix step entries
-        for idx, entry in enumerate(file_data):
-            if entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username:
-                file_data[idx] = car_node
-                break
-                
+        # Take this player off the pending list; rebuild budgets once everyone has chosen
+        queue['speed_pending'] = [u for u in pending if u != username]
+        if not queue['speed_pending']:
+            queue['requires_turn_speed_selection'] = False
+            from game_tables import build_movement_queue
+            cars = {r['owner']: r for r in file_data if r.get('CarPosition') == 'CarPosition'}
+            plist = [{'username': o, 'current_speed': int(float(c.get('current_speed', 0)))}
+                     for o, c in cars.items()]
+            fresh = build_movement_queue(plist, queue['phase'])
+            queue['players'] = fresh['players']
+            queue['active_player_turn'] = fresh['active_player_turn']
+            for p in queue['players']:
+                p['moved_this_segment'] = False
+
         write_game_file(active_filepath, file_data)
-        
-        return jsonify({
-            'status': 'success', 
-            'new_speed': new_speed,
-            'message': f"Speed synchronized to {new_speed} MPH.{damage_msg}"
-        }), 200
-        
+
+        return jsonify({'status': 'success', 'new_speed': new_speed,
+                        'message': f"Speed synchronized to {new_speed} MPH.{damage_msg}"}), 200
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"Error handling turn speed initialization sequence: {e}")
         return jsonify({'error': 'Internal server speed synchronization failure.'}), 500
 
 @app.route('/api/game/deploy_dropped_weapon', methods=['POST'])
@@ -2954,10 +2922,16 @@ def api_deploy_dropped_weapon():
     game_id = data.get('game_id')
     db_weapon_name = data.get('weapon_name')
     facing = data.get('facing')
+    crew_id = str(data.get('crew_id', '')).strip()
+    weapon_id = str(data.get('weapon_id', '')).strip()
     username = session['username']
 
     if not game_id or not db_weapon_name:
         return jsonify({'error': 'Missing game_id or weapon_name parameters'}), 400
+
+    crew_title = resolve_crew_title(game_id, username, crew_id)
+    if not crew_title:
+        return jsonify({'error': 'Invalid or missing crew member for this action'}), 400
 
     weapon_name = ""
     match db_weapon_name:
@@ -2986,16 +2960,8 @@ def api_deploy_dropped_weapon():
         weapon_x_size, weapon_y_size = get_base64_image_size(base64_string=weapon_profile.get('base64_data', ""))
         # 2. Grab the latest phase file path for this match room
         game_dir = game_dir_path(game_id)
-        all_files = os.listdir(game_dir)
-        game_files = sorted(
-            [f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')],
-            key=lambda f: os.path.getmtime(os.path.join(game_dir, f))
-        )
-
-        if not game_files:
-            return jsonify({'error': 'No active game log database files found.'}), 404
             
-        latest_filepath = os.path.join(game_dir, game_files[-1])
+        latest_filepath = os.path.join(game_dir, GameEngine.latest_phase_file(game_dir))
         file_records = read_game_file(latest_filepath)
 
         combat_queue = next((r for r in file_records if r.get('CarPosition') == 'CarPosition' and r.get('owner') == username), None)
@@ -3030,13 +2996,23 @@ def api_deploy_dropped_weapon():
             'orientation': attacker['orientation'],
         }
 
+        ok, err = claim_combat_action(game_id, username, crew_id, weapon_id)
+        if not ok:
+            return jsonify({'error': err}), 400
+        
         # 5. Commit calculations and serialize object data structural array straight down to game file layers
         file_records.append(dropped_entry)
         write_game_file(latest_filepath, file_records)
 
+        
+        phase_complete, msg = register_combat_action(
+            game_id, username, crew_title=crew_title, fired_names=[db_weapon_name])
+
         return jsonify({
             'status': 'success',
-            'game_file': os.path.basename(latest_filepath)
+            'game_file': os.path.basename(latest_filepath),
+            'phase_complete': phase_complete,
+            'message': msg
         }), 200
 
     except Exception as e:
@@ -3127,7 +3103,164 @@ def get_base64_image_size(base64_string):
     except Exception as e:
         print(f"Error parsing image size: {e}")
         return 0, 0
-    
+
+def combat_phase_complete(game_id: str, combat_queue: dict) -> bool:
+    """Done = every player has passed, or every crew member is True in the
+    queue (or was already spent earlier this turn per the design snapshot)."""
+    db_players = {p['username']: p for p in db.get_game_players(game_id)}
+    for p in combat_queue.get('players', []):
+        if p.get('passed'):
+            continue
+        info = db_players.get(p['username'])
+        if not info or not info.get('position_number') or not info.get('design'):
+            return False
+        snap = os.path.join(game_dir_path(game_id),
+                          f"player_{info['position_number']}_{info['design']}")
+        if not os.path.exists(snap):
+            return False
+        recs = GameEngine.read_game_file(snap)
+        if not recs:
+            return False
+        car = recs[0]
+        used = car.get('firing_actions_used_this_turn', [])
+        cw = p.get('crew_weapons_list', {})
+        for m in GameEngine.get_crew_roster(car):
+            if not (cw.get(m['title']) or m['id'] in used):
+                return False
+    return True
+
+def describe_game_position(game_id: str) -> dict:
+    game_dir = game_dir_path(game_id)
+    latest = GameEngine.latest_phase_file(game_dir) if os.path.isdir(game_dir) else ''
+    m = re.match(r'^T(\d+)P(\d+)([MC]?)\.txt$', latest)
+    if not m:
+        return {'turn': 0, 'phase': 0, 'subphase': 'Setup', 'active_player': None,
+                'label': 'Waiting for game to start'}
+
+    turn, phase, suffix = int(m.group(1)), int(m.group(2)), m.group(3)
+    recs = read_game_file(os.path.join(game_dir, latest))
+    mq = next((r for r in reversed(recs) if r.get('MovementQueue') == 'MovementQueue'), {})
+
+    pending = mq.get('speed_pending', [])
+    if pending:
+        subphase = 'Speed Selection'      # your "Phase 0"
+    elif suffix == 'C':
+        subphase = 'Combat'
+    elif suffix == 'M':
+        subphase = 'Movement'
+    else:
+        subphase = 'Setup'
+
+    active = mq.get('active_player_turn')
+    label = f"Turn {turn} · Phase {phase} · {subphase}"
+    if subphase == 'Movement' and active:
+        label += f" · {active} to move"
+    return {'turn': turn, 'phase': phase, 'subphase': subphase,
+            'active_player': active, 'speed_pending': pending, 'label': label}
+
+
+@app.route('/api/game/status/<game_id>', methods=['GET'])
+@login_required
+def game_status(game_id):
+    return jsonify(describe_game_position(str(game_id).strip())), 200
+
+def register_combat_action(game_id: str, username: str, crew_title=None,
+                           fired_names=(), passed=False):
+    """Marks crew/weapons used in the CombatQueue; advances the phase if everyone is done.
+    Returns (phase_complete, message)."""
+    game_dir = game_dir_path(game_id)
+    latest = GameEngine.latest_phase_file(game_dir)
+    if not latest.endswith('C.txt'):
+        return False, 'The game is not in a combat phase'
+    path = os.path.join(game_dir, latest)
+    data = read_game_file(path)
+
+    cq = next((e for e in reversed(data) if e.get('CombatQueue') == 'CombatQueue'), None)
+    if cq is None:
+        return False, 'No combat queue found in the current phase file'
+
+    for p in cq.get('players', []):
+        if p['username'] == username:
+            cw = p.setdefault('crew_weapons_list', {})
+            if passed:
+                p['passed'] = True
+            else:
+                if crew_title:
+                    cw[crew_title] = True
+                for nm in fired_names:
+                    cw[nm] = True
+            break
+    write_game_file(path, data)
+
+    if combat_phase_complete(game_id, cq):
+        from phase_manager import PhaseProgressionManager
+        ok, msg = PhaseProgressionManager.advance_to_next_phase_or_turn(game_id)
+        return True, msg
+    return False, 'Action registered. Waiting for remaining players...'
+
+def resolve_crew_title(game_id: str, username: str, crew_id: str):
+    """Maps 'crew_N' to the crew title (e.g. 'Driver') from the player's design snapshot."""
+    player = next((p for p in db.get_game_players(game_id) if p['username'] == username), None)
+    if not player:
+        return None
+    snap = os.path.join(game_dir_path(game_id),
+                        f"player_{player['position_number']}_{player['design']}")
+    if not os.path.exists(snap):
+        return None
+    recs = GameEngine.read_game_file(snap)
+    if not recs:
+        return None
+    return next((m['title'] for m in GameEngine.get_crew_roster(recs[0]) if m['id'] == crew_id), None)
+
+def mark_crew_used(game_id: str, username: str, crew_id: str):
+    player = next((p for p in db.get_game_players(game_id) if p['username'] == username), None)
+    if not player:
+        return
+    snap = os.path.join(game_dir_path(game_id),
+                        f"player_{player['position_number']}_{player['design']}")
+    recs = GameEngine.read_game_file(snap) if os.path.exists(snap) else []
+    if recs:
+        used = recs[0].setdefault('firing_actions_used_this_turn', [])
+        if crew_id not in used:
+            used.append(crew_id)
+        GameEngine.write_game_file(snap, recs)
+
+def claim_combat_action(game_id: str, username: str, crew_id: str, weapon_id: str):
+    """Validates the crew member and weapon/link, then records both as used in the
+    player's design snapshot. Returns (ok, error_message)."""
+    player = next((p for p in db.get_game_players(game_id) if p['username'] == username), None)
+    if not player:
+        return False, 'You are not a player in this game'
+    snap = os.path.join(game_dir_path(game_id),
+                        f"player_{player['position_number']}_{player['design']}")
+    if not os.path.exists(snap):
+        return False, 'Car snapshot file not found'
+    recs = GameEngine.read_game_file(snap)
+    if not recs:
+        return False, 'Car snapshot is empty or malformed'
+    car = recs[0]
+
+    if crew_id not in {m['id'] for m in GameEngine.get_crew_roster(car)}:
+        return False, 'Invalid crew member for this vehicle'
+    used_crew = car.setdefault('firing_actions_used_this_turn', [])
+    if crew_id in used_crew:
+        return False, 'That crew member has already taken a firing action this turn'
+
+    links = GameEngine.get_link_actions(car)
+    singles = GameEngine.get_available_firing_actions(car)
+    if weapon_id not in {a['id'] for a in links + singles}:
+        return False, 'Invalid weapon for this vehicle'
+    link = next((l for l in links if l['id'] == weapon_id), None)
+    ids = [link['id']] + link['members'] if link else [weapon_id]   # same convention as confirm_firing_action
+    used_w = car.setdefault('weapons_used_this_turn', [])
+    if any(i in used_w for i in ids):
+        return False, 'That weapon has already been used this turn'
+
+    used_crew.append(crew_id)
+    used_w.extend(ids)
+    GameEngine.write_game_file(snap, recs)
+    return True, ''
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':   
