@@ -452,8 +452,8 @@ class MapRenderer:
                 draw.rectangle ([1, 1, 19, 39], fill='gray')
 
         # Convert starting position to pixels
-        pixel_x_value = int(input_starting_x_qty * 40)
-        pixel_y_value = int(input_starting_y_qty * 40)
+        pixel_x_value = round(float(input_starting_x_qty) * 40)
+        pixel_y_value = round(float(input_starting_y_qty) * 40)
 
         # Rotate the car image to match orientation
         car_rgba = car_image.convert('RGBA')
@@ -545,7 +545,6 @@ class MapRenderer:
             paste_position,
             mask=weapon_rotated.split()[3]
         )
-
 
     # ── Internal Geometry Helpers ─────────────────────────────────────────────
 

@@ -24,6 +24,7 @@ from game_engine import GameEngine
 from game_tables import resolve_control_check, SPEED_CONTROL, CONTROL_TABLE, CONTROL_COLUMNS
 from collision import car_footprint, find_wall_collisions
 from game_tables import get_speed_control
+from collision import resolve_move
 
 app = Flask(__name__)
 
@@ -1642,7 +1643,7 @@ def handle_game_confirm_move():
         # ── 1. HARVEST THE ACTIVE PROPOSED PREVIEW GHOST BLOCK (FIXED KEY NORMALIZATION) ──
         ghost_node = None
         cache_key = f"{game_id}-{username}"
-        ghost_node = ACTIVE_PREVIEWS[cache_key] # Update high-speed volatile cache
+        ghost_node = ACTIVE_PREVIEWS.get(cache_key) # Update high-speed volatile cache
         
         # Extract real active maneuver from ghost preview if empty in payload
         if not maneuver or maneuver == 'None' or maneuver == '':
@@ -1678,6 +1679,11 @@ def handle_game_confirm_move():
 
         if player is None:
             return jsonify({'error': 'Not your turn, already moved this segment, or done with phase'}), 400
+
+        ghost_type = str(ghost_node.get('maneuver_preview_type', '')).strip() if ghost_node else ''
+        print(f"[CONFIRM_MOVE] payload={data.get('maneuver')!r} ghost={ghost_type!r} using={maneuver!r}")
+        if ghost_type and ghost_type != maneuver:
+            maneuver = ghost_type          # commit what the ghost showed
 
         is_half = maneuver == "HALF"
         if is_half:
@@ -1756,7 +1762,30 @@ def handle_game_confirm_move():
                     break
 
             if orig_car:
-                # Harvest your tracking parameters
+                res = resolve_move(file_data,
+                   float(orig_car.get('local_starting_x_qty', 0)),
+                   float(orig_car.get('local_starting_y_qty', 0)),
+                   float(orig_car.get('orientation', 0)),
+                   maneuver)
+                end = res['end']
+                car = file_data[car_idx]
+                car['local_starting_x_qty'] = end['x']
+                car['local_starting_y_qty'] = end['y']
+                car['orientation'] = int(round(end['orientation'])) % 360
+                car['heading'] = car['orientation']
+
+                if res['collided']:
+                    speed = int(float(car.get('current_speed', 0)))
+                    file_data.append({
+                        'CollisionRecord': 'CollisionRecord', 'owner': username,
+                        'round': queue_entry['round'], 'phase': queue_entry['phase'],
+                        'maneuver': maneuver, 'speed': speed,
+                        'ram': get_speed_control(speed)['ram'],      # recorded, not rolled
+                        'angle': res['angle'], 'head_on': res['head_on'], 'conformed': res['conformed'],
+                        'stop_fraction': res['stop_fraction'], 'hits': res['hits'],
+                        'note': res['note'], 'resolved': False})
+                    
+                # Harvest your tracking parameters 
                 orig_x = float(orig_car.get('local_starting_x_qty', 0))
                 orig_y = float(orig_car.get('local_starting_y_qty', 0))
                 orig_heading = float(orig_car.get('orientation', 0))
@@ -1795,14 +1824,14 @@ def handle_game_confirm_move():
                 grgt_x, grgt_y = math.cos(rad_g), math.sin(rad_g)
                 
                 # Back-calculate the absolute pixel center point
-                ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
-                ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
+                #ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
+                #ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
                 
                 # ── SYNC: Save the exact corrected float properties into your permanent file entry ──
-                file_data[car_idx]['local_starting_x_qty'] = float((ghost_center_x - half_w) / 40.0)
-                file_data[car_idx]['local_starting_y_qty'] = float((ghost_center_y - half_h) / 40.0)
-                file_data[car_idx]['orientation'] = int(round(ghost_heading))
-                file_data[car_idx]['heading'] = int(round(ghost_heading))
+                #file_data[car_idx]['local_starting_x_qty'] = float((ghost_center_x - half_w) / 40.0)
+                #file_data[car_idx]['local_starting_y_qty'] = float((ghost_center_y - half_h) / 40.0)
+                #file_data[car_idx]['orientation'] = int(round(ghost_heading))
+                #file_data[car_idx]['heading'] = int(round(ghost_heading))
                 
                 print(f"[SYNC SUCCESS] Locked permanent coordinates to match rendering matrix layout points.")
                 car = file_data[car_idx]
@@ -2463,12 +2492,12 @@ def render_game_file(game_id, filename):
                     grgt_y = math.sin(rad_g)
                     
                     # Back-calculate the ghost car center to match its pivot corner exactly
-                    ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
-                    ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
+                    #ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
+                    #ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
                     
                     # Translate aligned center pixels back into standard map grid coordinates
-                    ghost_copy['local_starting_x_qty'] = (ghost_center_x - half_w) / 40.0
-                    ghost_copy['local_starting_y_qty'] = (ghost_center_y - half_h) / 40.0
+                    #ghost_copy['local_starting_x_qty'] = (ghost_center_x - half_w) / 40.0
+                    #ghost_copy['local_starting_y_qty'] = (ghost_center_y - half_h) / 40.0
                     # ───────────────────────────────────────────────────
                 
                 injected_preview_lines.append(str(ghost_copy) + '\n')
