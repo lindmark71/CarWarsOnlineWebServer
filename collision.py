@@ -72,16 +72,58 @@ def _bbox(pts):
 def _bbox_overlap(a, b):
     return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
 
+def _is_convex(poly):
+    n = len(poly)
+    if n < 3:
+        return False
+    sign = 0
+    for i in range(n):
+        a, b, c = poly[i], poly[(i + 1) % n], poly[(i + 2) % n]
+        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        if abs(cross) < 1e-9:
+            continue
+        s_ = 1 if cross > 0 else -1
+        if sign == 0:
+            sign = s_
+        elif s_ != sign:
+            return False
+    return True
+
+def _sat_overlap(a, b, eps=1e-6):
+    """Overlap test for two CONVEX polygons (separating-axis theorem). Exact even when edges and corners
+    line up exactly, which the crossing test below cannot see. Touching (within eps) is not overlapping."""
+    for poly in (a, b):
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            nx, ny = y2 - y1, x1 - x2
+            length = math.hypot(nx, ny)
+            if length == 0:
+                continue
+            nx, ny = nx / length, ny / length
+            pa = [p[0] * nx + p[1] * ny for p in a]
+            pb = [p[0] * nx + p[1] * ny for p in b]
+            if max(pa) <= min(pb) + eps or max(pb) <= min(pa) + eps:
+                return False
+    return True
+
+def _centroid(poly):
+    return (sum(p[0] for p in poly) / len(poly), sum(p[1] for p in poly) / len(poly))
+
 def polygons_overlap(a, b):
     """True if two simple polygons (convex OR concave) share area."""
     if not _bbox_overlap(_bbox(a), _bbox(b)):
         return False
-    for i in range(len(a)):
+    if len(a) <= 8 and len(b) <= 8 and _is_convex(a) and _is_convex(b):     # cars and rectangles
+        return _sat_overlap(a, b)
+    for i in range(len(a)):                                                 # curved walls, concave shapes
         a1, a2 = a[i], a[(i + 1) % len(a)]
         for j in range(len(b)):
             if _edges_cross(a1, a2, b[j], b[(j + 1) % len(b)]):
                 return True
-    return any(_inside_strict(p, b) for p in a) or _inside_strict(b[0], a)
+    return (any(_inside_strict(p, b) for p in a) or _inside_strict(b[0], a)
+            or _inside_strict(_centroid(a), b) or _inside_strict(_centroid(b), a))
 
 def quad_hits_polyline(quad, pts):
     """An Arc is an outline only (a thin curved wall)."""
@@ -157,8 +199,10 @@ def map_bounds_px(records):
             return int(w) * GRID, int(h) * GRID
     return None
 
-def build_obstacles(records):
-    """Pre-computes every solid stationary shape once, so a move can be probed many times cheaply."""
+def build_obstacles(records, mover=None):
+    """Pre-computes every solid stationary shape once, so a move can be probed many times cheaply.
+    Pass `mover` (the username of the car that is moving) to also treat every OTHER car as a solid
+    obstacle at its current position; with mover=None cars are ignored."""
     shapes = []
     for idx, raw in enumerate(records):
         if not isinstance(raw, dict):
@@ -190,6 +234,25 @@ def build_obstacles(records):
                            'bbox': _bbox(shape[1])})
         except Exception as err:
             print(f'[COLLISION] skipped malformed {kind} at index {idx}: {err}')
+
+    if mover is not None:
+        newest = {}                                        # the newest CarPosition line per owner wins
+        for idx, raw in enumerate(records):
+            if isinstance(raw, dict):
+                e = _norm(raw)
+                if e.get('CarPosition') == 'CarPosition' and e.get('owner') != mover:
+                    newest[e.get('owner')] = (idx, e)
+        for owner, (idx, e) in newest.items():
+            try:
+                quad = footprint_from_center(float(e['local_starting_x_qty']) * GRID + HALF_W,
+                                             float(e['local_starting_y_qty']) * GRID + HALF_H,
+                                             float(e.get('orientation', 0)))
+                shapes.append({'type': 'Car', 'index': idx, 'kind': 'poly', 'data': quad, 'bbox': _bbox(quad),
+                               'owner': owner,
+                               'pose': (float(e['local_starting_x_qty']), float(e['local_starting_y_qty']),
+                                        float(e.get('orientation', 0)))})
+            except Exception as err:
+                print(f'[COLLISION] skipped car of {owner} at index {idx}: {err}')
     return {'shapes': shapes, 'bounds': map_bounds_px(records)}
 
 def collisions_with(quad, obstacles):
@@ -205,7 +268,10 @@ def collisions_with(quad, obstacles):
         hit = (polygons_overlap(quad, s['data']) if s['kind'] == 'poly'
                else quad_hits_polyline(quad, s['data']))
         if hit:
-            hits.append({'type': s['type'], 'index': s['index']})
+            hit_info = {'type': s['type'], 'index': s['index']}
+            if 'owner' in s:
+                hit_info['owner'] = s['owner']
+            hits.append(hit_info)
     return hits
 
 def find_wall_collisions(quad, records):
@@ -328,32 +394,20 @@ def _rotate_about(cx, cy, px, py, deg):
     return (px + dx * math.cos(phi) - dy * math.sin(phi),
             py + dx * math.sin(phi) + dy * math.cos(phi))
 
-def resolve_move(records, x_qty, y_qty, orientation, maneuver,
-                 samples=24, iterations=16, head_on_min_deg=45.0):
-    """Plays a maneuver against the map's solid objects.
-
-    x_qty / y_qty / orientation: the car's CarPosition before the move.
-    Returns a dict:
-      collided, conformed, head_on, angle   what happened (angle: 90 = square on, None if no hit)
-      stop_fraction                         how much of the move was completed (1.0 = all of it)
-      end / full_end                        where the car ends up / would have ended with no obstacle
-                                            ({'x','y'} in CarPosition grid units, 'orientation' in degrees)
-      hits, note
-    Head-on hits (angle >= head_on_min_deg) conform: the car stops flush against the object.
-    Sideswipes (angle < head_on_min_deg) complete the whole move, then the car swings about its rear
-    corner, away from the object, by the smallest rotation that leaves it clear (just touching).
-    Extra keys: sideswipe (bool), rotation (whole degrees the heading changed, + = clockwise).
-    """
+def _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver,
+                     samples=24, iterations=16, head_on_min_deg=45.0):
+    """Plays one maneuver against a prebuilt set of obstacles; the moving car conforms to all of them.
+    (See resolve_move for the result dictionary.)"""
     step, turn = parse_maneuver(maneuver)
     cx0, cy0 = x_qty * GRID + HALF_W, y_qty * GRID + HALF_H
     pose = lambda t, rnd=True: pose_at(cx0, cy0, float(orientation), step, turn, t, rnd)
     quad = lambda t: footprint_from_center(*pose(t))
     as_xy = lambda p: {'x': (p[0] - HALF_W) / GRID, 'y': (p[1] - HALF_H) / GRID, 'orientation': p[2] % 360}
 
-    obstacles = build_obstacles(records)
     full_end = as_xy(pose(1.0))
     out = {'collided': False, 'conformed': False, 'head_on': None, 'angle': None, 'stop_fraction': 1.0,
-           'end': full_end, 'full_end': full_end, 'hits': [], 'note': '', 'sideswipe': False, 'rotation': 0}
+           'end': full_end, 'full_end': full_end, 'hits': [], 'note': '', 'sideswipe': False, 'rotation': 0,
+           'pushed': [], 'conforming': None}
 
     start_hits = collisions_with(quad(0.0), obstacles)
     if start_hits:                                        # already overlapping: nothing sensible to conform to
@@ -439,4 +493,204 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
     final = swipe(hi_deg)
     out.update(conformed=True, sideswipe=True, end=as_xy(final),
                rotation=int(round(final[2] - h1)), note='sideswipe')
+    return out
+
+
+# ═══════════════════════════════ Car-versus-car conforming ═══════════════════════════════
+#
+# Each car has a DM (damage modifier). The moving car (V1) and the car it hits (V2) are compared:
+#   V1.DM >= V2.DM  ->  V1 forces V2 to conform: V1 completes its move and V2 is pushed out of the way.
+#   V1.DM <  V2.DM  ->  a lower-DM car never forces another to conform, so V1 conforms to V2
+#                       (V2 acts like a wall: head-on stops flush, a sideswipe swings clear).
+
+# (from_lbs, to_lbs, DM). The rulebook text so far: under 4,000 lbs = 2/3, 4,000 to 8,000 lbs = 1.
+# Heavier vehicles are not specified yet; they are treated as DM 1 until that row is filled in.
+DM_TABLE = ((0, 4000, 2.0 / 3.0), (4000, 8000, 1.0), (8000, float('inf'), 1.0))
+
+def dm_from_weight(weight_lbs):
+    w = float(weight_lbs)
+    for lo, hi, dm in DM_TABLE:
+        if lo <= w < hi:
+            return dm
+    return 1.0
+
+MAX_PUSH_PX = 2 * CAR_L          # a struck car is never pushed further than two car lengths
+
+
+def _first_contact_info(pose, obstacles, samples=24, iterations=16):
+    """Where the mover's path first overlaps `obstacles`, and how (angle, direction of travel, contact edge)."""
+    quad = lambda t: footprint_from_center(*pose(t))
+    prev, lo, hi, hi_hits = 0.0, None, None, None
+    for i in range(1, samples + 1):
+        t = i / samples
+        hits = collisions_with(quad(t), obstacles)
+        if hits:
+            lo, hi, hi_hits = prev, t, hits
+            break
+        prev = t
+    if hi is None:
+        return None
+    for _ in range(iterations):
+        mid = (lo + hi) / 2
+        h = collisions_with(quad(mid), obstacles)
+        if h:
+            hi, hi_hits = mid, h
+        else:
+            lo = mid
+    edges, points = _contact(quad(hi), _obstacle_segments(obstacles, hi_hits))
+    info = {'lo': lo, 'hi': hi, 'hits': hi_hits, 'angle': None, 'travel': None, 'point': None, 'edge': None}
+    if edges and points:
+        pt = (sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points))
+        d = _travel_direction(pose, hi, pt)
+        info.update(point=pt, travel=d)
+        if d:
+            scored = [(a, e) for e in edges for a in [_angle_to_wall(d, *e)] if a is not None]
+            if scored:
+                info['angle'], info['edge'] = max(scored, key=lambda s: s[0])
+    return info
+
+
+def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
+    """Moves the struck car (V2) the least distance that leaves it clear of the mover's final pose.
+    A head-on hit pushes V2 the way the mover was travelling; a sideswipe nudges it straight away from
+    the surface that was grazed. V2 keeps its heading (pivoting, as in the rulebook's Figure 10, is not
+    applied yet). Returns (push dict, None) or (None, reason it cannot be pushed)."""
+    info = _first_contact_info(pose, {'shapes': [shape], 'bounds': None})
+    angle = info['angle'] if info else None
+    head_on = angle is None or angle >= head_on_min_deg
+
+    car_quad = shape['data']
+    ccx, ccy = _centroid(car_quad)
+    if head_on or not info or not info['edge']:
+        d = (info or {}).get('travel')
+        if not d:                                           # fall back to the mover's final heading
+            qx = mover_end_quad
+            d = ((qx[0][0] - qx[3][0]), (qx[0][1] - qx[3][1]))
+            n = math.hypot(*d) or 1.0
+            d = (d[0] / n, d[1] / n)
+        direction, kind = d, 'travel'
+    else:                                                   # sideswipe: away from the grazed surface
+        (ax, ay), (bx, by) = info['edge']
+        nx, ny = ay - by, bx - ax
+        ln = math.hypot(nx, ny) or 1.0
+        nx, ny = nx / ln, ny / ln
+        px, py = info['point']
+        if nx * (ccx - px) + ny * (ccy - py) < 0:
+            nx, ny = -nx, -ny
+        direction, kind = (nx, ny), 'normal'
+
+    moved = lambda s: [(x + direction[0] * s, y + direction[1] * s) for x, y in car_quad]
+    clear = lambda s: not polygons_overlap(mover_end_quad, moved(s))
+    if clear(0.0):
+        return None, 'not overlapping the mover final pose'
+    prev, hi_s = 0.0, None
+    for k in range(1, int(MAX_PUSH_PX) + 1):
+        if clear(float(k)):
+            hi_s = float(k)
+            break
+        prev = float(k)
+    if hi_s is None:
+        return None, f'would have to be pushed more than {MAX_PUSH_PX:.0f} px'
+    lo_s = prev
+    for _ in range(24):
+        mid = (lo_s + hi_s) / 2
+        if clear(mid):
+            hi_s = mid
+        else:
+            lo_s = mid
+    s = hi_s
+
+    others = {'shapes': [o for o in obstacles['shapes'] if o['index'] != shape['index']], 'bounds': obstacles['bounds']}
+    blocked_by = collisions_with(moved(s), others)
+    if blocked_by:
+        b = blocked_by[0]
+        return None, f"blocked by {b['type']}" + (f" of {b['owner']}" if 'owner' in b else '')
+
+    x0, y0, h0 = shape['pose']
+    end = {'x': x0 + direction[0] * s / GRID, 'y': y0 + direction[1] * s / GRID, 'orientation': h0 % 360}
+    return {'owner': shape['owner'], 'index': shape['index'], 'direction': kind,
+            'distance_px': round(s, 4), 'dx_px': direction[0] * s, 'dy_px': direction[1] * s,
+            'angle': None if angle is None else round(angle, 1), 'head_on': head_on,
+            'start': {'x': x0, 'y': y0, 'orientation': h0 % 360}, 'end': end,
+            'quad': moved(s)}, None
+
+
+def resolve_move(records, x_qty, y_qty, orientation, maneuver,
+                 samples=24, iterations=16, head_on_min_deg=45.0, mover=None, dm=None):
+    """Plays a maneuver against the map's solid objects and, when `mover` is given, the other cars.
+
+    x_qty / y_qty / orientation: the moving car's CarPosition before the move.
+    mover: its username.  dm: {username: DM}; a car that is missing counts as DM 1.
+    Returns a dict:
+      collided, conformed, head_on, angle   what happened (angle: 90 = square on, None if no hit)
+      stop_fraction                         how much of the move was completed (1.0 = all of it)
+      end / full_end                        where the mover ends up / would have ended with no obstacle
+                                            ({'x','y'} in CarPosition grid units, 'orientation' in degrees)
+      sideswipe, rotation                   a sideswipe finishes the move and swings off the rear corner
+      conforming                            None, 'mover' (it conformed to a car) or 'other' (it pushed one)
+      pushed                                the cars it forced to conform: owner, index, start, end, ...
+      hits, note
+    Walls: head-on hits (angle >= head_on_min_deg) stop the mover flush; sideswipes finish the move and swing
+    the mover off its rear corner just clear of the surface.
+    Cars: see the DM rules above. A car that cannot be pushed (a wall or another car is behind it)
+    cannot be forced to conform, so the mover conforms to it instead.
+    """
+    obstacles = build_obstacles(records, mover)
+    cars = [s for s in obstacles['shapes'] if s['type'] == 'Car']
+    kw = dict(samples=samples, iterations=iterations, head_on_min_deg=head_on_min_deg)
+
+    def mover_conforms(note=''):
+        out = _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver, **kw)
+        if any(h['type'] == 'Car' for h in out['hits']):
+            out['conforming'] = 'mover'
+        if note:
+            out['note'] = f"{out['note']} | {note}" if out['note'] else note
+        return out
+
+    if mover is None or not cars:
+        return mover_conforms()
+
+    dm = dm or {}
+    mover_dm = float(dm.get(mover, 1.0))
+    forceable = {c['owner'] for c in cars if mover_dm >= float(dm.get(c['owner'], 1.0))}
+    if not forceable:
+        return mover_conforms()
+
+    if collisions_with(car_footprint(x_qty, y_qty, orientation), obstacles):      # already overlapping at the start
+        return mover_conforms()
+
+    # the mover completes its move, stopped only by walls and by cars it may not force to conform
+    blockers = {'shapes': [s for s in obstacles['shapes'] if not (s['type'] == 'Car' and s['owner'] in forceable)],
+                'bounds': obstacles['bounds']}
+    out = _resolve_against(blockers, x_qty, y_qty, orientation, maneuver, **kw)
+    if out['note'] == 'overlap_at_start':
+        return out
+
+    end = out['end']
+    end_quad = footprint_from_center(end['x'] * GRID + HALF_W, end['y'] * GRID + HALF_H, end['orientation'])
+    step, turn = parse_maneuver(maneuver)
+    cx0, cy0 = x_qty * GRID + HALF_W, y_qty * GRID + HALF_H
+    pose = lambda t, rnd=True: pose_at(cx0, cy0, float(orientation), step, turn, t, rnd)
+
+    working = {'shapes': list(obstacles['shapes']), 'bounds': obstacles['bounds']}
+    pushed = []
+    for shape in cars:
+        if shape['owner'] not in forceable or not polygons_overlap(end_quad, shape['data']):
+            continue
+        push, reason = _push_car(pose, end_quad, shape, working, head_on_min_deg)
+        if push is None:
+            return mover_conforms(f"{shape['owner']} could not be pushed ({reason}): the mover conformed instead")
+        pushed.append(push)
+        moved_shape = dict(shape, data=push['quad'], bbox=_bbox(push['quad']),
+                           pose=(push['end']['x'], push['end']['y'], push['end']['orientation']))
+        working['shapes'] = [moved_shape if o['index'] == shape['index'] else o for o in working['shapes']]
+
+    if not pushed:
+        return out
+    first = pushed[0]
+    for p in pushed:
+        p.pop('quad', None)
+    out.update(collided=True, conforming='other', pushed=pushed, head_on=first['head_on'], angle=first['angle'],
+               hits=[{'type': 'Car', 'index': p['index'], 'owner': p['owner']} for p in pushed] + out['hits'])
+    out['note'] = (out['note'] + ' | ' if out['note'] else '') + 'pushed ' + ', '.join(p['owner'] for p in pushed)
     return out

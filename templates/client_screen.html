@@ -2041,8 +2041,8 @@
                                 data-players="${g.max_players}"
                                 data-division="${g.division}"
                                 data-createdby="${g.created_by}"
-                                data-mininitialspeed="${g.min_initial_speed || 0}"
-                                data-initialspeed="${g.max_initial_speed || 60}">
+                                data-mininitialspeed="${g.min_initial_speed ?? 0}"
+                                data-initialspeed="${g.max_initial_speed ?? g.initial_speed ?? 60}">
                                 ${g.name}
                             </option>`
                         ).join('');
@@ -2053,84 +2053,90 @@
                 select.innerHTML = '<option value="">-- Error loading games --</option>';
             }
         }
-
-        async function populateDesignDropdown() {
+        
+        let designLoadToken = 0;
+        async function populateDesignDropdown(division = null) {
             const select = document.getElementById('joinDesignSelect');
+            const myToken = ++designLoadToken;
+            if (!division) {
+                select.innerHTML = '<option value="">-- Select a game first --</option>';
+                return;
+            }
             select.innerHTML = '<option value="">-- Loading designs... --</option>';
             try {
-                const response = await fetch('/list_designs');
+                const response = await fetch(`/list_designs?division=${encodeURIComponent(division)}`);
+                if (myToken !== designLoadToken) return;            // the player picked another game meanwhile
                 if (response.ok) {
                     const designs = await response.json();
+                    if (myToken !== designLoadToken) return;
+                    const label = `${Math.round(division / 1000)}K`;
                     select.innerHTML = designs.length === 0
-                        ? '<option value="">-- No designs available --</option>'
+                        ? `<option value="">-- No ${label} designs available --</option>`
                         : '<option value="">-- Select a design --</option>' +
                           designs.map(d => `<option value="${d}">${d}</option>`).join('');
                 } else {
                     select.innerHTML = '<option value="">-- Failed to load designs --</option>';
                 }
             } catch (err) {
-                select.innerHTML = '<option value="">-- Error loading designs --</option>';
+                if (myToken === designLoadToken) select.innerHTML = '<option value="">-- Error loading designs --</option>';
             }
         }
-        
+
+        let carImageLoadToken = 0;
         async function populateCarImageDropdown() {
             const select = document.getElementById('joinCarImageSelect');
             const gameSelect = document.getElementById('joinGameSelect');
-            const selectedGameId = gameSelect ? gameSelect.value : null;
+            const selectedGameId = gameSelect ? gameSelect.value : '';
+            const preview = document.getElementById('carImageJoinPreview');
+            const previous = select.value;                         // keep the player's choice if it is still free
+            const myToken = ++carImageLoadToken;
         
             select.innerHTML = '<option value="">-- Loading car images... --</option>';
         
             try {
-                // 1. Fetch the master gallery profile list of all registered car images
+                // 1. The master list of car images
                 const carImagesResponse = await fetch('/list_car_images');
+                if (myToken !== carImageLoadToken) return;         // a newer refresh has taken over
                 if (!carImagesResponse.ok) {
                     select.innerHTML = '<option value="">-- Failed to load car images --</option>';
                     return;
                 }
                 const totalImages = await carImagesResponse.json();
         
-                // 2. Query the live SQL database rows via the player registry endpoint
-                let unavailableCarImages = [];
-                if (selectedGameId && selectedGameId !== "") {
+                // 2. The images already claimed in the chosen game. The server reads these from the game file,
+                //    the same records it checks when you join, so the list and the rule always agree.
+                let claimed = [];
+                if (selectedGameId) {
                     try {
-                        // 🛡️ CRITICAL CORRECTION: Direct the request to the authentic SQL table router
-                        const playersResponse = await fetch(`/get_game_players/${selectedGameId}`);
-                        if (playersResponse.ok) {
-                            const activePlayersList = await playersResponse.json();
-                            
-                            if (Array.isArray(activePlayersList)) {
-                                // Extract using the exact database column schema tracking key: 'car_image'
-                                unavailableCarImages = activePlayersList
-                                    .map(player => player.car_image || player.car_image || '')
-                                    .filter(name => name !== '');
-                                console.log("[TAKEN CAR IMAGES LOG]", unavailableCarImages);
-                            }
-                        }
+                        const claimedResponse = await fetch(`/get_claimed_car_images/${encodeURIComponent(selectedGameId)}`);
+                        if (claimedResponse.ok) claimed = await claimedResponse.json();
                     } catch (err) {
-                        console.error('Error fetching live database player car configuration rows:', err);
+                        console.error('Could not load the claimed car images:', err);
                     }
                 }
+                if (myToken !== carImageLoadToken) return;
         
-                // 3. Render the updated dropdown options matching configuration states
+                // 3. Render: claimed images stay visible but cannot be chosen
                 if (totalImages.length === 0) {
                     select.innerHTML = '<option value="">-- No car images available --</option>';
                 } else {
                     let optionsHtml = '<option value="">-- Select a car image --</option>';
-                    
                     totalImages.forEach(img => {
-                        const isClaimed = unavailableCarImages.includes(img.name);
-                        if (isClaimed) {
-                            // 🔒 RESTOREED LOCKOUT FUNCTIONALITY: Gray out and append strict disabled tokens
-                            optionsHtml += `<option value="${img.name}" disabled style="color: #a0a0a0; background-color: #f0f0f2; font-style: italic;">${img.name} (by ${img.owner}) — [TAKEN]</option>`;
+                        if (claimed.includes(img.name)) {
+                            optionsHtml += `<option value="${img.name}" disabled
+                                style="color: #a0a0a0; background-color: #f0f0f2; font-style: italic;">${img.name} (by ${img.owner}) — [TAKEN]</option>`;
                         } else {
                             optionsHtml += `<option value="${img.name}">${img.name} (by ${img.owner})</option>`;
                         }
                     });
-        
                     select.innerHTML = optionsHtml;
+                    select.value = (previous && !claimed.includes(previous)) ? previous : '';
                 }
+                if (!select.value && preview) preview.style.display = 'none';
             } catch (err) {
-                select.innerHTML = '<option value="">-- Error loading car images --</option>';
+                if (myToken === carImageLoadToken) {
+                    select.innerHTML = '<option value="">-- Error loading car images --</option>';
+                }
             }
         
             // Refresh vehicle blueprint asset canvas frames on index choice change
@@ -2181,6 +2187,7 @@
         function onGameSelected(gameId) {
             const details = document.getElementById('gameDetails');
             if (!gameId) {
+                populateDesignDropdown();
                 details.style.display = 'none';
                 currentJoinGameDivision = null;
                 document.getElementById('joinSpeedContainer').style.display = 'none';
@@ -2196,6 +2203,7 @@
             document.getElementById('detailCreatedBy').textContent = option.dataset.createdby;
             details.style.display = 'block';
             currentJoinGameDivision = parseInt(option.dataset.division);
+            populateDesignDropdown(currentJoinGameDivision);
         
             // ── 🛠️ UPDATED: AUTOMATED ENVELOPE SCALE CONFIGURATOR ──
             const speedContainer = document.getElementById('joinSpeedContainer');
@@ -2223,10 +2231,7 @@
                 
                 speedContainer.style.display = 'flex';
             }
-        
-            const designSelect = document.getElementById('joinDesignSelect');
-            if (designSelect.value) onDesignSelected(designSelect.value);
-            
+                   
             // Renders the maps
             loadGameFileList(gameId);
             
@@ -2244,42 +2249,19 @@
             if (!design) { alert('Please select a design.'); return; }
             if (!carImageName) { alert('Please select a car image.'); return; }
         
+            // The design must belong to this game's budget: 25K_ designs for a 25,000 game, and so on.
+            // (The dropdown only offers matching designs; this also catches a design with no K_ prefix,
+            // and the server makes the same check.)
             if (currentJoinGameDivision) {
                 const designCost = getDivisionFromFilename(design);
-                if (designCost !== null && designCost > currentJoinGameDivision) {
-                    alert(`Cannot join: "${design}" costs ${designCost.toLocaleString()} which exceeds division limit.`);
+                if (designCost !== currentJoinGameDivision) {
+                    alert(`Cannot join: this game only allows ${currentJoinGameDivision / 1000}K designs, ` +
+                          `and "${design}" is not one.`);
                     return;
                 }
             }
         
             try {
-                // ── NEW STEP 1: SQL TABLE ROW INITIALIZATION & FILE RESERVATION ──
-                // Save the chosen structural design to database state tables first
-                //const registerDesignResponse = await fetch('/set_player_design', {
-                //    method: 'POST',
-                //    headers: { 'Content-Type': 'application/json' },
-                //    body: JSON.stringify({ game_id: gameId, username: currentUser, design: design })
-                //});
-                
-                //if (!registerDesignResponse.ok) {
-                //    const err = await registerDesignResponse.json();
-                //    alert(`Could not initialize player design blueprint asset: ${err.error}`);
-                //    return;
-                //}
-        
-                // ── NEW STEP 2: ASSIGN CAR IMAGE LOGS ──
-                //const carImgResponse = await fetch('/set_player_car_image', {
-                //    method: 'POST',
-                //    headers: { 'Content-Type': 'application/json' },
-                //    body: JSON.stringify({ game_id: gameId, car_image_name: carImageName })
-                //});
-                
-                //if (!carImgResponse.ok) {
-                //    const err = await carImgResponse.json();
-                //    alert(`Joined but could not assign car image: ${err.error}`);
-                //    return;
-                //}
-        
                 // ── NEW STEP 3: EXECUTE MAIN JOIN GAME HANDLER ROUTINE ──
                 // Now that the player design text snapshot is completely saved to disk,
                 // we can join the game and write safely to T1P0.txt with the top_speed available.
@@ -2301,6 +2283,7 @@
                 if (!joinResponse.ok) {
                     const err = await joinResponse.json();
                     alert(`Could not join game: ${err.error}`);
+                    populateCarImageDropdown();      // the image may have just been claimed by someone else                    
                     return;
                 }
                 const joinData = await joinResponse.json();
@@ -2860,7 +2843,10 @@
                                 const tk = gameStatePayload.ticker_data;
                                 console.log("startPolling: value of tk.mode: ", tk.mode)
                                 togglePhaseControls(tk.mode, tk.active_player);
-        
+                                if (tk.mode === 'Movement' && tk.active_player === currentUser) {
+                                    applyMovementBudgetRules(gameStatePayload);
+                                }
+
                                 const formattedStatusString = `${tk.game_name}: Turn ${tk.turn}, Phase ${tk.phase}, [${tk.mode}], ${tk.active_player}'s turn.`;
                                 const tickerElement = document.getElementById('live-turn-ticker');
                                 if (tickerElement) {
@@ -3115,16 +3101,47 @@
             checkMyTurn(currentGameId);
         }
         
+        const MOVEMENT_BUTTON_IDS = [
+            'ID_D6L', 'ID_D5L', 'ID_D4L', 'ID_D3L', 'ID_D2L', 'ID_D1L',
+            'ID_STR', 'ID_HALF',
+            'ID_D1R', 'ID_D2R', 'ID_D3R', 'ID_D4R', 'ID_D5R', 'ID_D6R'
+        ];
+
+        // Which movement buttons are legal for the movement budget this player has left in the phase.
+        // It only ever DISABLES buttons, so it is safe to call after the code that enables them.
+        //   - only a 1/2 left (5 mph; or the full move at 55 mph already used)  -> every button but 1/2 off
+        //   - no 1/2 left (already used, or this phase never had one)           -> the 1/2 button off
+        function applyMovementBudgetRules(gameStatePayload) {
+            const me = gameStatePayload?.queue?.players?.find(p => p.username === currentUser);
+            if (!me) return;
+            const fullLeft = parseInt(me.full_remaining, 10) || 0;
+            const halfLeft = parseFloat(me.half_remaining) || 0;
+        
+            const disable = id => {
+                const btn = document.getElementById(id);
+                if (btn) {
+                    btn.disabled = true;
+                    btn.style.opacity = '0.4';
+                }
+            };
+        
+            if (fullLeft === 0 && halfLeft > 0) {
+                MOVEMENT_BUTTON_IDS.forEach(id => { if (id !== 'ID_HALF') disable(id); });
+            } else if (halfLeft <= 0) {
+                disable('ID_HALF');
+            }
+        }
+
         // ── Bottom row buttons ────────────────────────────────────────────
         // Helper function to send a driving maneuver to the server
         async function sendManeuver(maneuverCode) {
             const activeGameId = navState.gameId;
-
+        
             if (!activeGameId) {
                 console.error("[CRITICAL] Cannot staging vector: No active game ID session context tracked.");
                 return;
             }
-
+        
             try {
                 // 1. Dispatch coordinate telemetry parameters to the Python layer
                 const response = await fetch('/api/game/maneuver', {
@@ -3142,12 +3159,6 @@
                     // 2. Map structural type tags right onto client runtime engine scope
                     ghostData.maneuver_preview_type = ghostData.maneuver_preview_type || maneuverCode;
         
-                    // 3. Fallback tracking logic protection layers for vehicle textures
-                    let targetCarName = ghostData.car_image_name;
-                    if (!targetCarName || targetCarName.trim() === "" || targetCarName.toLowerCase() === "default") {
-                        targetCarName = 'blue_car'; 
-                    }
-        
                     const ghostImgElement = new Image();
                     ghostImgElement.onload = () => {
                         console.log("[RENDER SYNC] Frame and sprite loaded. Redrawing canvas clean.");
@@ -3157,15 +3168,23 @@
                         console.error("[IMAGE ERROR] Sub-channel route failure:", err);
                     };
         
-                    // 4. Bind browser element references to the localized structure dictionary
+                    // 3. Bind browser element references to the localized structure dictionary
                     ghostData.imageElement = ghostImgElement;
                     currentManeuverGhost = ghostData;
+        
+                    // 4. The ghost is the car being moved, so it is drawn with that car's own image. The server
+                    //    sends the name; never substitute another car's picture if it is missing.
+                    const targetCarName = (ghostData.car_image_name || '').trim();
+                    if (!targetCarName || targetCarName.toLowerCase() === 'default' || targetCarName === 'default_car.png') {
+                        console.error("[GHOST] The server sent no car image for this move; nothing to draw.", ghostData);
+                        return;
+                    }
         
                     // 5. Secure target base64 binary rows mapping pipelines safely
                     const assetRes = await fetch(`/get_car_image/${encodeURIComponent(targetCarName)}`);
                     if (!assetRes.ok) throw new Error("Asset endpoint unavailable");
                     const payload = await assetRes.json();
-                    
+        
                     if (payload && payload.base64_data) {
                         ghostImgElement.src = `data:image/png;base64,${payload.base64_data}`;
                     }
@@ -3891,7 +3910,7 @@
                 // ─── ADD THIS DROPPED WEAPON INTERCEPT BLOCK ───
                 // Check if the selected weapon matches your dropping systems (e.g., Mines, Oil Slicks, Smoke)
                 const droppedWeaponKeywords = ['Flame Cloud Ejector', 
-                                               'Flaming Oiol Jet', 
+                                               'Flaming Oil Jet', 
                                                'Oil Jet', 
                                                'Ice Dropper', 
                                                'Minedropper', 

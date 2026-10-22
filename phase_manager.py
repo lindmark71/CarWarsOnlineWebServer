@@ -135,32 +135,28 @@ class PhaseProgressionManager:
         queue['complete'] = False
         queue['current_system_subphase'] = 'Movement'
         for p in queue['players']:
-            p['moved_this_segment'] = False        
+            p['moved_this_segment'] = False
 
         if next_phase == 1:
             # New turn: every player picks a speed before anyone moves
             queue['requires_turn_speed_selection'] = True
-            queue['speed_pending'] = [p['username'] for p in players]            
+            queue['speed_pending'] = [p['username'] for p in players]
 
-        if not queue['players']:
-            # ── NOBODY MOVES THIS PHASE: adjudicate it and go straight to combat ──
-            queue['complete'] = True
-            queue['active_player_turn'] = cls.calculate_combat_initiative(list(by_owner.values()))
+        combat_queue = build_combat_queue(players, game_dir)   # ALL cars, not just movers
 
-            # 1. Movement file is written first, recording that it was empty and resolved
-            GameEngine.write_game_file(new_path, records + [queue, combat_queue])
+        new_name = f"T{next_turn}P{next_phase}M.txt"
+        new_path = os.path.join(game_dir, new_name)
 
-            # 2. Combat file is the same state with the subphase flipped,
-            #    matching what handle_game_confirm_move writes when movement finishes normally
-            queue['current_system_subphase'] = 'Combat'
-            combat_name = f"T{next_turn}P{next_phase}C.txt"
-            GameEngine.write_game_file(os.path.join(game_dir, combat_name),
-                                       records + [queue, combat_queue])
-
+        # ── 2. NOBODY MOVES THIS PHASE ──
+        # Not on a new turn: this queue was built from last turn's speeds. confirm_turn_speed
+        # makes the same check once the players have chosen this turn's speeds.
+        if not queue['players'] and next_phase != 1:
+            combat_name = cls.resolve_empty_movement(game_dir, records + [queue, combat_queue])
             print(f"[ENGINE] No movement in T{next_turn}P{next_phase}; created {new_name} and {combat_name}")
             return True, (f"Advanced to Turn {next_turn}, Phase {next_phase}. "
                           f"No movement this phase; now in [Combat].")
 
+        # ── 3. NORMAL PHASE ──
         records.append(queue)
         records.append(combat_queue)
         GameEngine.write_game_file(new_path, records)
@@ -186,3 +182,30 @@ class PhaseProgressionManager:
                 if best_key is None or key > best_key:
                     best, best_key = f, key
         return best
+
+    @classmethod
+    def resolve_empty_movement(cls, game_dir: str, records: list) -> str:
+        """Nobody has any movement this phase. `records` must already contain this phase's
+        MovementQueue and CombatQueue. Writes the movement file (marked complete), then the
+        combat file, and returns the combat file's name."""
+        print(f"[EMPTY PHASE] closing movement in {game_dir} ({len(records)} records)")        
+        queue = next(r for r in reversed(records) if r.get('MovementQueue') == 'MovementQueue')
+        turn = int(queue.get('turn_count', queue.get('round', 1)))
+        phase = int(queue.get('phase', 1))
+
+        cars = {}
+        for r in records:
+            if r.get('CarPosition') == 'CarPosition':
+                cars[r.get('owner')] = r
+
+        queue['players'] = []
+        queue['complete'] = True
+        queue['active_player_turn'] = cls.calculate_combat_initiative(list(cars.values()))
+
+        queue['current_system_subphase'] = 'Movement'
+        GameEngine.write_game_file(os.path.join(game_dir, f"T{turn}P{phase}M.txt"), records)
+
+        queue['current_system_subphase'] = 'Combat'
+        combat_name = f"T{turn}P{phase}C.txt"
+        GameEngine.write_game_file(os.path.join(game_dir, combat_name), records)
+        return combat_name

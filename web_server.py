@@ -55,6 +55,9 @@ GAME_FOLDER          = './games'
 # ── IN-MEMORY CACHE SCHEMA FOR DRIVING PREVIEWS ──
 # Keys will be 'game_id-username', holding the active ProposedCarPosition dict atom
 ACTIVE_PREVIEWS = {}
+HALF_ONLY_MESSAGE = 'Only a 1/2 move is allowed with the movement you have left this phase.'
+NO_HALF_MESSAGE = 'There is no 1/2 move left in this phase.'
+
 
 os.makedirs(UPLOAD_FOLDER_MAP,    exist_ok=True)
 os.makedirs(UPLOAD_FOLDER_DESIGN, exist_ok=True)
@@ -806,6 +809,15 @@ def create_game():
         return jsonify({'error': 'At least 2 players are required'}), 400
 
     try:
+        min_initial_speed, max_initial_speed = int(min_initial_speed), int(max_initial_speed)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Starting speed limits must be numbers'}), 400
+    if (not 0 <= min_initial_speed <= max_initial_speed <= 300
+            or min_initial_speed % 5 or max_initial_speed % 5):
+        return jsonify({'error': 'Starting speed limits must be multiples of 5 between 0 and 300, '
+                                 'with the minimum no higher than the maximum.'}), 400
+    
+    try:
         game_id = db.create_game(
             name          = name,
             map_file      = map_file,
@@ -837,7 +849,10 @@ def create_game():
 @login_required
 def list_games():
     try:
-        return jsonify(db.get_all_games()), 200
+        games = db.get_all_games()
+        for g in games:
+            g['min_initial_speed'], g['max_initial_speed'] = game_speed_limits(g)
+        return jsonify(games), 200
     except Exception as e:
         print(f'Error listing games: {e}')
         return jsonify({'error': 'Failed to retrieve games'}), 500
@@ -963,8 +978,8 @@ def join_game():
     if not game_id:
         return jsonify({'error': 'game_id is required'}), 400
     design_choice = data.get('design', '').strip()
-    driver_selected_speed = int(data.get('starting_speed', 0)) # Default fallback safety
-
+    #driver_selected_speed = int(data.get('starting_speed', 0)) # Default fallback safety
+    
     try:
         game = db.get_game(game_id)
         if not game:
@@ -977,6 +992,23 @@ def join_game():
             return jsonify({'error': 'Game is full'}), 400
         if db.is_player_in_game(game_id, session['username']):
             return jsonify({'error': 'You are already in this game'}), 400
+
+        lo, hi = game_speed_limits(game)
+        raw_speed = data.get('starting_speed')
+        try:
+            driver_selected_speed = lo if raw_speed is None else int(raw_speed)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'starting_speed must be a number'}), 400
+        if not lo <= driver_selected_speed <= hi or driver_selected_speed % 5:
+            return jsonify({'error': f'Starting speed must be between {lo} and {hi} mph, '
+                                     f'in steps of 5, for this game.'}), 400
+
+        game_division = int(game.get('division') or 0)
+        if game_division and design_division(design_choice) != game_division:
+            return jsonify({'error': f'This game is for {game_division // 1000}K designs, '
+                                     f'and "{design_choice}" is not one.'}), 400
+        if design_choice not in visible_design_names(session['username']):
+            return jsonify({'error': f'"{design_choice}" is not available to you.'}), 400
 
         car_image_name = data.get('car_image_name', '').strip()
         t1p0_path = find_t1p0_path(game_id, game['name'])
@@ -1247,15 +1279,11 @@ def list_my_games():
 @login_required
 def list_designs():
     try:
-        public  = db.get_all_designs()
-        private = [d for d in db.get_designs_by_owner(session['username'])
-                   if d['is_private'] == 1]
-        seen, combined = set(), []
-        for d in public + private:
-            if d['filename'] not in seen:
-                seen.add(d['filename'])
-                combined.append(d)
-        return jsonify([d['filename'] for d in combined]), 200
+        names = visible_design_names(session['username'])
+        division = request.args.get('division', type=int)
+        if division is not None:
+            names = [n for n in names if design_division(n) == division]
+        return jsonify(names), 200
     except Exception as e:
         print(f'Error listing designs: {e}')
         return jsonify({'error': 'Failed to retrieve designs'}), 500
@@ -1547,6 +1575,13 @@ def handle_game_maneuver():
             return jsonify({"error": "Missing valid game_id or maneuver code parameters in payload"}), 400
         
         success, result_data = GameEngine.process_player_movement(game_id, username, maneuver)
+        #if half_only_violation(my_movement_entry(game_id, username), maneuver):
+        #    return jsonify({"error": HALF_ONLY_MESSAGE}), 400
+        # handle_game_maneuver (preview)
+        problem = movement_violation(my_movement_entry(game_id, username), maneuver)
+        if problem:
+            return jsonify({"error": problem}), 400
+                
         if not success:
             print(f"[MANEUVER 400] game={game_id} user={username} maneuver={maneuver} -> {result_data}")
             return jsonify({"error": result_data}), 400
@@ -1579,7 +1614,8 @@ def handle_game_maneuver():
                     "y": clean_ghost['local_starting_y_qty'],
                     "orientation": clean_ghost['orientation'],
                     # 🛠️ FIX: Ensure this exact property string is defined and sent down!
-                    "maneuver_preview_type": maneuver
+                    "maneuver_preview_type": maneuver,
+                    "car_image_name": clean_ghost.get('car_image_name')
                 }
             }), 200
 
@@ -1609,14 +1645,15 @@ def handle_game_fire():
 @login_required
 def handle_game_confirm_move():
     """
-    Records a player's movement choice, advances the subphase queue, and
-    synchronizes metadata fields to unlock the frontend title ticker display.
-    Enforces dynamic fractional budgets, maneuver exhaustion, and terminal fraction locks.
+    Commits a player's staged movement: spends their movement budget, resolves the move against
+    walls and other cars (collision.resolve_move), advances the movement queue and, when everyone
+    is finished, opens the combat file for this phase.
+
+    Needs, defined elsewhere in this module:  movement_violation, car_dm_map, ACTIVE_PREVIEWS,
+    read_game_file / write_game_file, game_dir_path.   Needs collision.py next to web_server.py.
     """
-    print("!!! CONFIRM_MOVE ROUTE HIT !!!")
-    from datetime import datetime
-    import os
-    from flask import jsonify, request, session
+    from collision import resolve_move
+    from game_tables import get_speed_control
 
     data = request.get_json() or {}
     game_id = str(data.get('game_id', data.get('gameId', ''))).strip()
@@ -1629,37 +1666,37 @@ def handle_game_confirm_move():
     game_dir = game_dir_path(game_id)
     if not os.path.isdir(game_dir):
         return jsonify({'error': f'No active game state directory found for ID: {game_id}'}), 404
-        
-    all_files = os.listdir(game_dir)
-    game_files = sorted([f for f in all_files if re.match(r'^T\d+P', f) and f.endswith('.txt')])
-    if not game_files:
+
+    # The newest phase file by turn and phase number (not by name: 'T10P1M' sorts before 'T2P1M')
+    latest = GameEngine.latest_phase_file(game_dir)
+    if not latest:
         return jsonify({'error': f'No active game state tracking files found for ID: {game_id}'}), 404
-        
-    filepath = os.path.join(game_dir, GameEngine.latest_phase_file(game_dir))
+    filepath = os.path.join(game_dir, latest)
 
     try:
         file_data = read_game_file(filepath)
 
-        # ── 1. HARVEST THE ACTIVE PROPOSED PREVIEW GHOST BLOCK (FIXED KEY NORMALIZATION) ──
-        ghost_node = None
+        # ── 1. THE STAGED PREVIEW: what the player saw is what gets committed ──
         cache_key = f"{game_id}-{username}"
-        ghost_node = ACTIVE_PREVIEWS.get(cache_key) # Update high-speed volatile cache
-        
-        # Extract real active maneuver from ghost preview if empty in payload
-        if not maneuver or maneuver == 'None' or maneuver == '':
-            if ghost_node:
-                maneuver = str(ghost_node.get('maneuver_preview_type', 'STR')).strip()
-            else:
-                maneuver = 'STR'
+        ghost_node = ACTIVE_PREVIEWS.get(cache_key)
+        if not ghost_node:
+            # Nothing staged (already confirmed, or the server restarted). Refusing here also stops a
+            # second click on Confirm from repeating the move.
+            return jsonify({'error': 'Choose a maneuver first so a preview is staged, then confirm.'}), 400
 
+        ghost_type = str(ghost_node.get('maneuver_preview_type', '')).strip()
+        if not maneuver or maneuver == 'None':
+            maneuver = ghost_type or 'STR'
+        elif ghost_type and ghost_type != maneuver:
+            print(f"[CONFIRM_MOVE] payload maneuver {maneuver!r} differs from the preview {ghost_type!r}; "
+                  f"committing the preview")
+            maneuver = ghost_type
 
-        # 2. Locate the central system MovementQueue block
+        # ── 2. LOCATE THE MOVEMENT QUEUE ──
         queue_entry = None
-        queue_index = None
         for i, entry in reversed(list(enumerate(file_data))):
             if entry.get('MovementQueue') == 'MovementQueue':
                 queue_entry = entry
-                queue_index = i
                 break
 
         if queue_entry is None:
@@ -1673,35 +1710,32 @@ def handle_game_confirm_move():
             if 'moved_this_segment' not in p:
                 p['moved_this_segment'] = False
 
-        # Isolate this specific player from inside the movement queue sub-block matrix
-        player = next((p for p in players if p['username'] == username and not p['done']
-                       and not p['moved_this_segment']), None)
-
+        # This player's entry in the queue
+        player = next((p for p in players if p['username'] == username
+                       and not p['done'] and not p['moved_this_segment']), None)
         if player is None:
             return jsonify({'error': 'Not your turn, already moved this segment, or done with phase'}), 400
 
-        ghost_type = str(ghost_node.get('maneuver_preview_type', '')).strip() if ghost_node else ''
-        print(f"[CONFIRM_MOVE] payload={data.get('maneuver')!r} ghost={ghost_type!r} using={maneuver!r}")
-        if ghost_type and ghost_type != maneuver:
-            maneuver = ghost_type          # commit what the ghost showed
+        first_active = next((p for p in players if not p['done'] and not p['moved_this_segment']), None)
+        if first_active is None or first_active['username'] != username:
+            return jsonify({'error': 'It is currently not your turn to execute a move based on speed initiative'}), 400
 
-        is_half = maneuver == "HALF"
-        if is_half:
+        # Is this maneuver legal for the movement left? (only a 1/2 left -> only the 1/2; no 1/2 left -> no 1/2)
+        problem = movement_violation(player, maneuver)
+        if problem:
+            return jsonify({'error': problem}), 400
+
+        # ── 3. SPEND THE MOVEMENT ──
+        if maneuver == "HALF":
             player['remaining'] = player['remaining'] - 0.5
             player['half_remaining'] = player['half_remaining'] - 0.5
         else:
             player['remaining'] = player['remaining'] - 1.0
             player['full_remaining'] = player['full_remaining'] - 1
 
-        first_active = next((p for p in players if not p['done'] and not p['moved_this_segment']), None)
-        if first_active is None or first_active['username'] != username:
-            return jsonify({'error': 'It is currently not your turn to execute a move based on speed initiative'}), 400
-
-        # 3. Synchronize handling class deductions for maneuvers (Bends)
-        bend_maneuvers = {'D1L','D2L','D3L','D4L','D5L','D6L','D1R','D2R','D3R','D4R','D5R','D6R'}
-        is_bend = maneuver in bend_maneuvers
-
-        if is_bend:
+        # ── 3b. HANDLING CLASS: a bend costs the car its D-number in HC ──
+        bend_maneuvers = {'D1L', 'D2L', 'D3L', 'D4L', 'D5L', 'D6L', 'D1R', 'D2R', 'D3R', 'D4R', 'D5R', 'D6R'}
+        if maneuver in bend_maneuvers:
             player_db_entries = db.get_game_players(game_id)
             player_entry = next((p for p in player_db_entries if p['username'] == username), None)
 
@@ -1710,8 +1744,7 @@ def handle_game_confirm_move():
                 design = player_entry.get('design')
 
                 if position_number and design:
-                    snapshot_filename = f"player_{position_number}_{design}"
-                    snapshot_path = os.path.join(game_dir, snapshot_filename)
+                    snapshot_path = os.path.join(game_dir, f"player_{position_number}_{design}")
 
                     if os.path.exists(snapshot_path):
                         try:
@@ -1725,7 +1758,8 @@ def handle_game_confirm_move():
 
                                 if isinstance(parsed_data, dict):
                                     car_record = parsed_data
-                                elif isinstance(parsed_data, list) and len(parsed_data) > 0 and isinstance(parsed_data[0], dict):
+                                elif isinstance(parsed_data, list) and len(parsed_data) > 0 \
+                                        and isinstance(parsed_data[0], dict):
                                     car_record = parsed_data[0]
                                     is_wrapped_in_list = True
 
@@ -1733,127 +1767,74 @@ def handle_game_confirm_move():
                                     d_value_match = re.search(r'\d+', maneuver)
                                     if d_value_match:
                                         d_cost = int(d_value_match.group())
-                                        current_hc = int(car_record.get('hc', 0))
-                                        new_hc = current_hc - d_cost
+                                        new_hc = int(car_record.get('hc', 0)) - d_cost
                                         car_record['hc'] = str(new_hc)
 
-                                    with open(snapshot_path, 'w', encoding='utf-8') as f:
-                                        if is_wrapped_in_list:
-                                            f.write(str([car_record]) + '\n')
-                                        else:
-                                            f.write(str(car_record) + '\n')
-                                    print(f"[HC UPDATE SUCCESS] Reduced {username}'s HC by {d_cost}. New HC: {new_hc}")
+                                        with open(snapshot_path, 'w', encoding='utf-8') as f:
+                                            if is_wrapped_in_list:
+                                                f.write(str([car_record]) + '\n')
+                                            else:
+                                                f.write(str(car_record) + '\n')
+                                        print(f"[HC UPDATE SUCCESS] Reduced {username}'s HC by {d_cost}. New HC: {new_hc}")
                         except Exception as hc_err:
                             print(f"[HC UPDATE ERROR] Failed executing raw file subtraction parse: {hc_err}")
 
-        hits = []
-        # ── 4. STAGE INTEGRATION LOCKDOWN: APPLY UNIFIED REAR-PIVOT SWING ALGORITHM ── 🛠
-        cache_key = f"{game_id}-{username}"
-        ghost_node = ACTIVE_PREVIEWS.get(cache_key)
+        # ── 4. MOVE THE CAR: resolve the maneuver against walls and other cars ──
+        # (the old corner-swing block that used to live here is gone; resolve_move replaces it entirely)
+        orig_idx, orig_car = None, None
+        for idx, entry in reversed(list(enumerate(file_data))):
+            if entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username:
+                orig_idx, orig_car = idx, entry
+                break
 
-        if ghost_node:
-            # 1. Pull the permanent baseline car data from the file_data structure
-            orig_car = None
-            car_idx = None
-            for idx, entry in reversed(list(enumerate(file_data))):
-                if entry.get('CarPosition') == 'CarPosition' and entry.get('owner') == username:
-                    orig_car = entry
-                    car_idx = idx
-                    break
+        collided = False
+        if orig_car is not None:
+            # plain numbers, read BEFORE anything is modified
+            start_x = float(orig_car.get('local_starting_x_qty', 0))
+            start_y = float(orig_car.get('local_starting_y_qty', 0))
+            start_h = float(orig_car.get('orientation', 0))
 
-            if orig_car:
-                res = resolve_move(file_data,
-                   float(orig_car.get('local_starting_x_qty', 0)),
-                   float(orig_car.get('local_starting_y_qty', 0)),
-                   float(orig_car.get('orientation', 0)),
-                   maneuver)
-                end = res['end']
-                car = file_data[car_idx]
-                car['local_starting_x_qty'] = end['x']
-                car['local_starting_y_qty'] = end['y']
-                car['orientation'] = int(round(end['orientation'])) % 360
-                car['heading'] = car['orientation']
+            res = resolve_move(file_data, start_x, start_y, start_h, maneuver,
+                               mover=username, dm=car_dm_map(game_id))
+            print(f"[COLLISION] {username} {maneuver}: collided={res['collided']} conforming={res['conforming']} "
+                  f"stop={res['stop_fraction']} pushed="
+                  f"{[(p['owner'], round(p['dx_px'], 2), round(p['dy_px'], 2)) for p in res['pushed']]} "
+                  f"note={res['note']!r}")
 
-                if res['collided']:
-                    speed = int(float(car.get('current_speed', 0)))
-                    file_data.append({
-                        'CollisionRecord': 'CollisionRecord', 'owner': username,
-                        'round': queue_entry['round'], 'phase': queue_entry['phase'],
-                        'maneuver': maneuver, 'speed': speed,
-                        'ram': get_speed_control(speed)['ram'],      # recorded, not rolled
-                        'angle': res['angle'], 'head_on': res['head_on'], 'conformed': res['conformed'],
-                        'stop_fraction': res['stop_fraction'], 'hits': res['hits'],
-                        'note': res['note'], 'resolved': False})
-                    
-                # Harvest your tracking parameters 
-                orig_x = float(orig_car.get('local_starting_x_qty', 0))
-                orig_y = float(orig_car.get('local_starting_y_qty', 0))
-                orig_heading = float(orig_car.get('orientation', 0))
-                ghost_heading = float(ghost_node.get('orientation', 0))
-                
-                # Rigid chassis pixel bounds (21x41 template scale assets)
-                half_w = 10.5
-                half_h = 20.5
-                car_len = 40.0
-                
-                # Compute original pixel coordinate centers
-                orig_center_x = orig_x * 40.0 + half_w
-                orig_center_y = orig_y * 40.0 + half_h
-                
-                # Map vector headings
-                rad_o = math.radians(orig_heading)
-                fwd_x, fwd_y = math.sin(rad_o), -math.cos(rad_o)
-                rgt_x, rgt_y = math.cos(rad_o), math.sin(rad_o)
-                
-                # Step forward exactly one car length line distance
-                step1_center_x = orig_center_x + car_len * fwd_x
-                step1_center_y = orig_center_y + car_len * fwd_y
-                
-                # Identify if it's a left or right turn
-                heading_delta = (ghost_heading - orig_heading) % 360
-                is_right_bend = (0 < heading_delta < 180)
-                
-                # Pivot exactly on the rear corner axis point
-                side_multiplier = 1.0 if is_right_bend else -1.0
-                pivot_x = step1_center_x - half_h * fwd_x + (half_w * side_multiplier) * rgt_x
-                pivot_y = step1_center_y - half_h * fwd_y + (half_w * side_multiplier) * rgt_y
-                
-                # Ghost vectors
-                rad_g = math.radians(ghost_heading)
-                gfwd_x, gfwd_y = math.sin(rad_g), -math.cos(rad_g)
-                grgt_x, grgt_y = math.cos(rad_g), math.sin(rad_g)
-                
-                # Back-calculate the absolute pixel center point
-                #ghost_center_x = pivot_x + half_h * gfwd_x - (half_w * side_multiplier) * grgt_x
-                #ghost_center_y = pivot_y + half_h * gfwd_y - (half_w * side_multiplier) * grgt_y
-                
-                # ── SYNC: Save the exact corrected float properties into your permanent file entry ──
-                #file_data[car_idx]['local_starting_x_qty'] = float((ghost_center_x - half_w) / 40.0)
-                #file_data[car_idx]['local_starting_y_qty'] = float((ghost_center_y - half_h) / 40.0)
-                #file_data[car_idx]['orientation'] = int(round(ghost_heading))
-                #file_data[car_idx]['heading'] = int(round(ghost_heading))
-                
-                print(f"[SYNC SUCCESS] Locked permanent coordinates to match rendering matrix layout points.")
-                car = file_data[car_idx]
-                hits = find_wall_collisions(car_footprint(car['local_starting_x_qty'], car['local_starting_y_qty'], car['orientation']), file_data)
-                if hits:
-                    speed = int(float(car.get('current_speed', 0)))
-                    file_data.append({
-                        'CollisionRecord': 'CollisionRecord', 'owner': username,
-                        'round': queue_entry['round'], 'phase': queue_entry['phase'],
-                        'maneuver': maneuver, 'speed': speed,
-                        'ram': get_speed_control(speed)['ram'],     # e.g. '7d' -- recorded, not rolled
-                        'hits': hits, 'resolved': False})
-    
-            # Flush volatile preview cache maps out of memory registers safely
-            ACTIVE_PREVIEWS.pop(cache_key, None)
-            print(f"[CACHE FLASH CONCLUDED] Volatile cache released for key: {cache_key}")
-            
+            # the moving car
+            end = res['end']
+            car = file_data[orig_idx]
+            car['local_starting_x_qty'] = float(end['x'])
+            car['local_starting_y_qty'] = float(end['y'])
+            car['orientation'] = int(round(end['orientation'])) % 360
+            car['heading'] = car['orientation']
+
+            # every car it forced to conform (res['pushed'] holds the new position; it has to be written here)
+            for p in res['pushed']:
+                other = file_data[p['index']]
+                other['local_starting_x_qty'] = float(p['end']['x'])
+                other['local_starting_y_qty'] = float(p['end']['y'])
+
+            collided = res['collided']
+            if collided:
+                speed = int(float(car.get('current_speed', 0)))
+                file_data.append({
+                    'CollisionRecord': 'CollisionRecord', 'owner': username,
+                    'round': queue_entry.get('round', 1), 'phase': queue_entry.get('phase', 1),
+                    'maneuver': maneuver, 'speed': speed,
+                    'ram': get_speed_control(speed)['ram'],          # recorded, not rolled yet
+                    'angle': res['angle'], 'head_on': res['head_on'], 'conformed': res['conformed'],
+                    'sideswipe': res['sideswipe'], 'rotation': res['rotation'],
+                    'conforming': res['conforming'], 'pushed': [p['owner'] for p in res['pushed']],
+                    'stop_fraction': res['stop_fraction'], 'hits': res['hits'],
+                    'note': res['note'], 'resolved': False})
         else:
-            # Fallback traditional increment deduction loop if direct lookups return empty
-            player['full_remaining'] = max(0, int(player.get('full_remaining', 1)) - 1)
+            print(f"[CONFIRM_MOVE] no CarPosition found for {username}; the queue advances but nothing moves")
 
-        # Turn progression update markers
+        # The preview has been used up
+        ACTIVE_PREVIEWS.pop(cache_key, None)
+
+        # ── 5. ADVANCE THE QUEUE ──
         player['moved_this_segment'] = True
 
         move_record = {
@@ -1865,7 +1846,7 @@ def handle_game_confirm_move():
             'timestamp': datetime.now().isoformat()
         }
 
-        # Handle complete phase exhaustion boundaries cleanly
+        # Movement used up -> done; more to go -> this player may move again (their next turn comes round)
         if float(player['remaining']) <= 0.0:
             player['done'] = True
             player['moved_this_segment'] = True
@@ -1873,15 +1854,11 @@ def handle_game_confirm_move():
             player['done'] = False
             player['moved_this_segment'] = False
 
-        # 5. Commit calculations back down via the central engine pipeline coordinates lock
-
-        # Check turn management progression triggers
         all_phase_done = all(p['done'] for p in queue_entry['players'])
         queue_entry['game_name'] = queue_entry.get('game_name', 'Hammer Downs Arena')
         queue_entry['turn_count'] = queue_entry.get('turn_count', 1)
 
-        # Initialize target file path destination variable
-        save_destination = filepath 
+        save_destination = filepath
 
         if all_phase_done:
             queue_entry['complete'] = True
@@ -1896,40 +1873,34 @@ def handle_game_confirm_move():
             else:
                 queue_entry['active_player_turn'] = 'Combat Phase Open'
 
-            # ── NEW: Dynamic File Path Evolution Logic ──
+            # The combat phase gets its own file
             current_turn = queue_entry.get('round', 1)
             current_phase = queue_entry.get('phase', 1)
             combat_filename = f"T{current_turn}P{current_phase}C.txt"
-            
-            # Switch the destination from the old movement path to the new combat file path
             save_destination = os.path.join(game_dir, combat_filename)
             print(f"[ENGINE SHIFT] Phase complete. Elevating track to: {combat_filename}")
-
         else:
             queue_entry['complete'] = False
             queue_entry['current_system_subphase'] = 'Movement'
             next_mover = next((p for p in queue_entry['players'] if not p['done']), player)
             queue_entry['active_player_turn'] = next_mover['username'] if next_mover else username
 
-        # Map orientation normalization safeguards
-        #for record in reversed(file_data):
-        #    if record.get('CarPosition') == 'CarPosition':
-        #        record['heading'] = int(round(float(record.get('heading', 0))))
-        #        record['orientation'] = int(round(float(record.get('orientation', 0))))
-                # Embed updated movement queue meta fields back inside ledger arrays
+        # Put the updated queue back and save
         for idx, entry in reversed(list(enumerate(file_data))):
             if entry.get('MovementQueue') == 'MovementQueue':
                 file_data[idx] = queue_entry
                 break
-        # ── FIXED: Write using our dynamic save_destination tracking pointer ──
         write_game_file(save_destination, file_data)
 
         return jsonify({'message': f'{username} moved: {maneuver}',
                         'queue': queue_entry,
                         'move_record': move_record,
-                        'phase_complete': queue_entry['complete'],
-                        'collision': bool(hits)}), 200
+                        'collision': collided,
+                        'phase_complete': queue_entry['complete']}), 200
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f'Error confirming move segment: {e}')
         return jsonify({'error': 'Failed to confirm move updates.'}), 500
 
@@ -2210,7 +2181,6 @@ def get_car_speed_limits(game_id: str, username: str):
                         break
     return current, top, accel
 
-
 @app.route('/api/game_state/<game_id>')
 def get_game_state(game_id):
     game_id = str(game_id).strip()
@@ -2229,8 +2199,18 @@ def get_game_state(game_id):
         records = GameEngine.read_game_file(os.path.join(game_dir, latest))
         mq = next((r for r in reversed(records)
                    if r.get('MovementQueue') == 'MovementQueue'), {})
-
         pending = mq.get('speed_pending', [])
+
+        # ── Safety net: nobody can move and nobody is choosing a speed, so close the phase ──
+        if suffix == 'M' and mq and not pending and not mq.get('players') and not mq.get('complete'):
+            print(f"[SAFETY NET] closing empty movement phase T{turn}P{phase}")
+            from phase_manager import PhaseProgressionManager
+            latest = PhaseProgressionManager.resolve_empty_movement(game_dir, records)
+            suffix = 'C'
+            records = GameEngine.read_game_file(os.path.join(game_dir, latest))
+            mq = next((r for r in reversed(records)
+                       if r.get('MovementQueue') == 'MovementQueue'), {})
+
         if pending:
             mode = 'Speed Selection'
         elif suffix == 'C':
@@ -2238,7 +2218,6 @@ def get_game_state(game_id):
         else:
             mode = 'Movement'
 
-        # Combat is simultaneous: every player may act
         active = username if mode == 'Combat' else mq.get('active_player_turn', '')
 
         speed_dialog = None
@@ -2922,6 +2901,8 @@ def confirm_turn_speed():
 
         # Take this player off the pending list; rebuild budgets once everyone has chosen
         queue['speed_pending'] = [u for u in pending if u != username]
+
+        nobody_moves = False
         if not queue['speed_pending']:
             queue['requires_turn_speed_selection'] = False
             from game_tables import build_movement_queue
@@ -2933,8 +2914,13 @@ def confirm_turn_speed():
             queue['active_player_turn'] = fresh['active_player_turn']
             for p in queue['players']:
                 p['moved_this_segment'] = False
+            nobody_moves = not queue['players']          # everyone chose 0 mph
 
-        write_game_file(active_filepath, file_data)
+        if nobody_moves:
+            from phase_manager import PhaseProgressionManager
+            PhaseProgressionManager.resolve_empty_movement(game_dir, file_data)
+        else:
+            write_game_file(active_filepath, file_data)
 
         return jsonify({'status': 'success', 'new_speed': new_speed,
                         'message': f"Speed synchronized to {new_speed} MPH.{damage_msg}"}), 200
@@ -2976,7 +2962,7 @@ def api_deploy_dropped_weapon():
             weapon_name = "flaming_oil.bmp"
         case "Spike Dropper":
             weapon_name = "spikes.bmp"
-        case "StickyFoam":
+        case "Sticky Foam Sprayer":
             weapon_name = "sticky_foam.bmp"
 
     try:
@@ -3187,7 +3173,6 @@ def describe_game_position(game_id: str) -> dict:
     return {'turn': turn, 'phase': phase, 'subphase': subphase,
             'active_player': active, 'speed_pending': pending, 'label': label}
 
-
 @app.route('/api/game/status/<game_id>', methods=['GET'])
 @login_required
 def game_status(game_id):
@@ -3289,6 +3274,107 @@ def claim_combat_action(game_id: str, username: str, crew_id: str, weapon_id: st
     used_w.extend(ids)
     GameEngine.write_game_file(snap, recs)
     return True, ''
+
+def game_speed_limits(game: dict):
+    """(min, max) starting speed the game's creator allowed."""
+    lo = game.get('min_initial_speed')
+    hi = game.get('max_initial_speed')
+    if hi is None:
+        hi = game.get('initial_speed')
+    lo = 0 if lo is None else int(lo)
+    hi = 60 if hi is None else int(hi)          # games saved before limits existed keep the old default
+    return lo, max(lo, hi)
+
+def my_movement_entry(game_id: str, username: str):
+    """This player's entry in the current MovementQueue, or None."""
+    game_dir = game_dir_path(game_id)
+    latest = GameEngine.latest_phase_file(game_dir)
+    if not latest:
+        return None
+    recs = read_game_file(os.path.join(game_dir, latest))
+    mq = next((r for r in reversed(recs) if r.get('MovementQueue') == 'MovementQueue'), None)
+    if not mq:
+        return None
+    return next((p for p in mq.get('players', []) if p['username'] == username), None)
+
+def half_only_violation(entry, maneuver: str) -> bool:
+    """True when the movement left is only a half move and `maneuver` is anything else."""
+    if not entry:
+        return False
+    return (int(entry.get('full_remaining', 0)) == 0
+            and float(entry.get('half_remaining', 0.0)) > 0
+            and maneuver != 'HALF')
+
+def movement_violation(entry, maneuver: str):
+    """An error message if `maneuver` isn't legal for the movement budget left, else None."""
+    if not entry:
+        return None
+    full = int(entry.get('full_remaining', 0))
+    half = float(entry.get('half_remaining', 0.0))
+    if maneuver == 'HALF':
+        return None if half > 0 else NO_HALF_MESSAGE
+    if full <= 0 and half > 0:
+        return HALF_ONLY_MESSAGE
+    return None
+
+def design_division(filename: str):
+    """Budget encoded in a design's file name ('25K_Interceptor' -> 25000), or None."""
+    m = re.match(r'^(\d+)K_', os.path.basename(filename or ''), re.IGNORECASE)
+    return int(m.group(1)) * 1000 if m else None
+
+def visible_design_names(username: str) -> list:
+    """Design file names this player may pick: every public design, plus their own private ones."""
+    public = db.get_all_designs()
+    private = [d for d in db.get_designs_by_owner(username) if d['is_private'] == 1]
+    seen, names = set(), []
+    for d in public + private:
+        if d['filename'] not in seen:
+            seen.add(d['filename'])
+            names.append(d['filename'])
+    return names
+
+def claimed_car_images(game_id: str) -> set:
+    """Car image names already used in this game, read from the game's T1P0 file --
+    the same records join_game enforces against."""
+    t1p0 = os.path.join(game_dir_path(game_id), 'T1P0.txt')
+    names = set()
+    if os.path.exists(t1p0):
+        for record in read_game_file(t1p0):
+            n = {str(k).replace(' ', ''): v for k, v in record.items()}
+            if n.get('CarPosition') == 'CarPosition' and n.get('car_image_name'):
+                names.add(n['car_image_name'])
+    return names
+
+@app.route('/get_claimed_car_images/<game_id>', methods=['GET'])
+@login_required
+def get_claimed_car_images(game_id):
+    try:
+        return jsonify(sorted(claimed_car_images(str(game_id).strip()))), 200
+    except Exception as e:
+        print(f'Error reading claimed car images: {e}')
+        return jsonify({'error': 'Failed to read claimed car images'}), 500
+    
+def car_dm_map(game_id: str) -> dict:
+    """{username: DM} from each player's design snapshot (vehicle weight in lbs). Unknown weight counts as DM 1."""
+    from collision import dm_from_weight
+    out = {}
+    game_dir = game_dir_path(game_id)
+    for p in db.get_game_players(game_id):
+        dm = 1.0
+        snap = os.path.join(game_dir, f"player_{p['position_number']}_{p['design']}")
+        recs = GameEngine.read_game_file(snap) if os.path.exists(snap) else []
+        if recs:
+            for key in ('total_weight', 'weight', 'gross_weight', 'loaded_weight'):   # GUESS: real key name unknown
+                if key in recs[0]:
+                    try:
+                        dm = dm_from_weight(float(re.sub(r'[^\d.]', '', str(recs[0][key]))))
+                    except ValueError:
+                        pass
+                    break
+            else:
+                print(f"[DM] no weight found in {snap}; counting {p['username']} as DM 1")
+        out[p['username']] = dm
+    return out
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
