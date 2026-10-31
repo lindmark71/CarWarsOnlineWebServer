@@ -21,10 +21,11 @@ from flask import Flask, render_template, request, redirect, jsonify, session
 import database as db
 import secrets
 from game_engine import GameEngine 
-from game_tables import resolve_control_check, SPEED_CONTROL, CONTROL_TABLE, CONTROL_COLUMNS
+from game_tables import resolve_control_check, get_speed_control, SPEED_CONTROL, CONTROL_TABLE, CONTROL_COLUMNS
 from collision import car_footprint, find_wall_collisions
 from game_tables import get_speed_control
-from collision import resolve_move
+from collision import resolve_move, apply_speed_changes
+
 
 app = Flask(__name__)
 
@@ -1640,7 +1641,7 @@ def handle_game_fire():
             return jsonify({"error": message}), 400
     except Exception as e:
         return jsonify({"error": f"Engine combat failure: {str(e)}"}), 500
-    
+
 @app.route('/api/game/confirm_move', methods=['POST'])
 @login_required
 def handle_game_confirm_move():
@@ -1652,7 +1653,7 @@ def handle_game_confirm_move():
     Needs, defined elsewhere in this module:  movement_violation, car_dm_map, ACTIVE_PREVIEWS,
     read_game_file / write_game_file, game_dir_path.   Needs collision.py next to web_server.py.
     """
-    from collision import resolve_move
+    from collision import resolve_move, apply_speed_changes
     from game_tables import get_speed_control
 
     data = request.get_json() or {}
@@ -1788,11 +1789,14 @@ def handle_game_confirm_move():
                 break
 
         collided = False
+        speed_changes = []
         if orig_car is not None:
             # plain numbers, read BEFORE anything is modified
             start_x = float(orig_car.get('local_starting_x_qty', 0))
             start_y = float(orig_car.get('local_starting_y_qty', 0))
             start_h = float(orig_car.get('orientation', 0))
+
+            speed_before = int(float(orig_car.get('current_speed', 0)))          # the speed the collision happens at
 
             res = resolve_move(file_data, start_x, start_y, start_h, maneuver,
                                mover=username, dm=car_dm_map(game_id))
@@ -1815,9 +1819,19 @@ def handle_game_confirm_move():
                 other['local_starting_x_qty'] = float(p['end']['x'])
                 other['local_starting_y_qty'] = float(p['end']['y'])
 
+            # speed changes from the impact(s): sideswipe none; t-bone halves the mover; rear-end averages
+            # both cars; head-on takes the average off both (the slower car can go negative)
+            speeds = {r['owner']: r.get('current_speed', 0) for r in file_data if r.get('CarPosition') == 'CarPosition'}
+            new_speeds, speed_changes = apply_speed_changes(res['impacts'], username, speeds)
+            for r in file_data:
+                if r.get('CarPosition') == 'CarPosition' and r.get('owner') in new_speeds:
+                    r['current_speed'] = new_speeds[r['owner']]
+            for c in speed_changes:
+                print(f"[SPEED] {c['owner']}: {c['before']} -> {c['after']} mph ({c['type']} with {c['with']})")
+
             collided = res['collided']
             if collided:
-                speed = int(float(car.get('current_speed', 0)))
+                speed = speed_before
                 file_data.append({
                     'CollisionRecord': 'CollisionRecord', 'owner': username,
                     'round': queue_entry.get('round', 1), 'phase': queue_entry.get('phase', 1),
@@ -1826,6 +1840,8 @@ def handle_game_confirm_move():
                     'angle': res['angle'], 'head_on': res['head_on'], 'conformed': res['conformed'],
                     'sideswipe': res['sideswipe'], 'rotation': res['rotation'],
                     'conforming': res['conforming'], 'pushed': [p['owner'] for p in res['pushed']],
+                    'impacts': [{k: i[k] for k in ('owner', 'type', 'conformed', 'angle')} for i in res['impacts']],
+                    'speed_changes': speed_changes,
                     'stop_fraction': res['stop_fraction'], 'hits': res['hits'],
                     'note': res['note'], 'resolved': False})
         else:
@@ -1890,12 +1906,17 @@ def handle_game_confirm_move():
             if entry.get('MovementQueue') == 'MovementQueue':
                 file_data[idx] = queue_entry
                 break
-        write_game_file(save_destination, file_data)
+        saved = write_game_file(save_destination, file_data)
+        print(f"[SAVE] {os.path.abspath(save_destination)} saved={saved} exists={os.path.exists(save_destination)} "
+              f"records={len(file_data)}")
+        if not saved or not os.path.exists(save_destination):
+            return jsonify({'error': f'Could not save {os.path.basename(save_destination)}; see the server terminal.'}), 500
 
         return jsonify({'message': f'{username} moved: {maneuver}',
                         'queue': queue_entry,
                         'move_record': move_record,
                         'collision': collided,
+                        'speed_changes': speed_changes,
                         'phase_complete': queue_entry['complete']}), 200
 
     except Exception as e:
@@ -1903,6 +1924,7 @@ def handle_game_confirm_move():
         traceback.print_exc()
         print(f'Error confirming move segment: {e}')
         return jsonify({'error': 'Failed to confirm move updates.'}), 500
+
 
 @app.route('/resolve_control_check', methods=['POST'])
 @login_required

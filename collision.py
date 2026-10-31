@@ -407,7 +407,7 @@ def _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver,
     full_end = as_xy(pose(1.0))
     out = {'collided': False, 'conformed': False, 'head_on': None, 'angle': None, 'stop_fraction': 1.0,
            'end': full_end, 'full_end': full_end, 'hits': [], 'note': '', 'sideswipe': False, 'rotation': 0,
-           'pushed': [], 'conforming': None}
+           'pushed': [], 'conforming': None, 'impact_heading': None, 'impacts': []}
 
     start_hits = collisions_with(quad(0.0), obstacles)
     if start_hits:                                        # already overlapping: nothing sensible to conform to
@@ -446,7 +446,7 @@ def _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver,
 
     head_on = True if angle is None else angle >= head_on_min_deg
     out.update(collided=True, head_on=head_on, angle=None if angle is None else round(angle, 1),
-               hits=hi_hits, stop_fraction=round(lo, 6))
+               hits=hi_hits, stop_fraction=round(lo, 6), impact_heading=pose(hi, False)[2] % 360)
     if angle is None:
         out['note'] = 'no_contact_edge'
     if head_on:
@@ -606,11 +606,12 @@ def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
         b = blocked_by[0]
         return None, f"blocked by {b['type']}" + (f" of {b['owner']}" if 'owner' in b else '')
 
+    mover_heading = (pose(info['hi'], False)[2] if info else pose(1.0, False)[2]) % 360
     x0, y0, h0 = shape['pose']
     end = {'x': x0 + direction[0] * s / GRID, 'y': y0 + direction[1] * s / GRID, 'orientation': h0 % 360}
     return {'owner': shape['owner'], 'index': shape['index'], 'direction': kind,
             'distance_px': round(s, 4), 'dx_px': direction[0] * s, 'dy_px': direction[1] * s,
-            'angle': None if angle is None else round(angle, 1), 'head_on': head_on,
+            'angle': None if angle is None else round(angle, 1), 'head_on': head_on, 'mover_heading': mover_heading,
             'start': {'x': x0, 'y': y0, 'orientation': h0 % 360}, 'end': end,
             'quad': moved(s)}, None
 
@@ -643,6 +644,14 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
         out = _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver, **kw)
         if any(h['type'] == 'Car' for h in out['hits']):
             out['conforming'] = 'mover'
+            by_index = {c['index']: c for c in cars}
+            for h in out['hits']:
+                if h['type'] == 'Car' and h['index'] in by_index and out['impact_heading'] is not None:
+                    struck_heading = by_index[h['index']]['pose'][2] % 360
+                    out['impacts'].append({
+                        'owner': h['owner'], 'index': h['index'], 'conformed': 'mover', 'angle': out['angle'],
+                        'mover_heading': out['impact_heading'], 'struck_heading': struck_heading,
+                        'type': classify_car_impact(out['angle'], out['impact_heading'], struck_heading)})
         if note:
             out['note'] = f"{out['note']} | {note}" if out['note'] else note
         return out
@@ -690,7 +699,77 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
     first = pushed[0]
     for p in pushed:
         p.pop('quad', None)
+        out['impacts'].append({
+            'owner': p['owner'], 'index': p['index'], 'conformed': 'other', 'angle': p['angle'],
+            'mover_heading': p['mover_heading'], 'struck_heading': p['start']['orientation'],
+            'type': classify_car_impact(p['angle'], p['mover_heading'], p['start']['orientation'])})
     out.update(collided=True, conforming='other', pushed=pushed, head_on=first['head_on'], angle=first['angle'],
                hits=[{'type': 'Car', 'index': p['index'], 'owner': p['owner']} for p in pushed] + out['hits'])
     out['note'] = (out['note'] + ' | ' if out['note'] else '') + 'pushed ' + ', '.join(p['owner'] for p in pushed)
     return out
+
+
+# ═══════════════════════════════ Collision types and speed changes ═══════════════════════════════
+#
+# Four types of car-versus-car collision, from the approach angle and the two cars' headings:
+#   sideswipe  the mover meets the other car at under 45 degrees to its surface   -> no speed change
+#   head-on    the cars face each other (headings 135-180 degrees apart)          -> each loses the AVERAGE speed
+#   rear-end   the cars point the same way (headings 0-45 degrees apart)          -> both end at the AVERAGE speed
+#   t-bone     anything in between                                                -> the MOVER's speed is halved
+# "Mover" is the car whose movement caused the collision; the car it hits is not the mover.
+
+SPEED_STEP = 5               # speeds change in whole steps of 5 mph
+SPEED_ROUNDING = 'nearest'   # 'nearest' (an exact tie goes DOWN, toward zero), 'down' or 'up'; applied to the size of the speed
+
+def classify_car_impact(angle, mover_heading, struck_heading, sideswipe_below_deg=45.0):
+    """'sideswipe', 'head-on', 'rear-end' or 't-bone'.  angle: the mover's angle to the struck surface
+    (90 = square on); None (cars lined up exactly, no measurable edge) counts as square on."""
+    if angle is not None and angle < sideswipe_below_deg:
+        return 'sideswipe'
+    rel = abs(((float(struck_heading) - float(mover_heading) + 180.0) % 360.0) - 180.0)   # 0 = same way, 180 = opposite
+    if rel >= 135.0:
+        return 'head-on'
+    if rel <= 45.0:
+        return 'rear-end'
+    return 't-bone'
+
+def round_speed(v):
+    """Rounds a speed to a multiple of SPEED_STEP using SPEED_ROUNDING (applied to the size, keeping the sign)."""
+    sign = -1 if v < 0 else 1
+    units = abs(float(v)) / SPEED_STEP
+    if SPEED_ROUNDING == 'down':
+        r = math.floor(units + 1e-9)
+    elif SPEED_ROUNDING == 'up':
+        r = math.ceil(units - 1e-9)
+    else:
+        r = math.ceil(units - 0.5 - 1e-9)          # nearest; an exact .5 goes down
+    return sign * r * SPEED_STEP
+
+def speeds_after_collision(kind, mover_speed, other_speed):
+    """(new mover speed, new other speed), before rounding. A speed below zero means the car is being pushed backwards."""
+    m, o = float(mover_speed), float(other_speed)
+    if kind == 't-bone':
+        return m / 2.0, o                           # only the car that moved halves
+    avg = (m + o) / 2.0
+    if kind == 'rear-end':
+        return avg, avg                             # both end at the average
+    if kind == 'head-on':
+        return m - avg, o - avg                     # each is reduced by the average; the slower car can go negative
+    return m, o                                     # sideswipe: unchanged
+
+def apply_speed_changes(impacts, mover, speeds):
+    """Applies resolve_move()'s `impacts` in order, each using the speeds as the previous one left them.
+    speeds: {username: current speed}. Returns (new speeds {username: int}, changes), where each change is
+    {'owner', 'with', 'type', 'before', 'after'} and only cars whose speed really changed are listed."""
+    speeds = {k: float(v) for k, v in speeds.items()}
+    changes = []
+    for imp in impacts:
+        other = imp['owner']
+        m0, o0 = speeds.get(mover, 0.0), speeds.get(other, 0.0)
+        m1, o1 = (round_speed(v) for v in speeds_after_collision(imp['type'], m0, o0))
+        speeds[mover], speeds[other] = m1, o1
+        for who, with_, before, after in ((mover, other, m0, m1), (other, mover, o0, o1)):
+            if before != after:
+                changes.append({'owner': who, 'with': with_, 'type': imp['type'],
+                                'before': int(before) if before == int(before) else before, 'after': int(after)})
+    return {k: int(v) for k, v in speeds.items()}, changes
