@@ -550,14 +550,100 @@ def _first_contact_info(pose, obstacles, samples=24, iterations=16):
     return info
 
 
+MAX_PIVOT_DEG = 120              # a struck car never pivots further than this
+
+
+def _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_heading, which_end='far'):
+    """T-bone conforming (rulebook Figure 10). The struck car (V2) pivots about the end of the struck side
+    that is FARTHER from the point of impact (the corner stays put), and the end that was hit swings away the
+    way the mover is travelling, by the smallest turn that leaves V2 clear of the mover's final pose.
+    which_end='far' (the default) is that end; 'near' is the other end of the same side, used as a second
+    choice. The mover has already completed its whole move.
+    Returns (push dict, None) or (None, reason it cannot pivot)."""
+    a, b = info['edge']                                   # the two ends of the side that was struck
+    pt = info['point']
+    near_a = math.hypot(a[0] - pt[0], a[1] - pt[1]) <= math.hypot(b[0] - pt[0], b[1] - pt[1])
+    if which_end == 'far':                                # pivot on the end away from the impact
+        near_a = not near_a
+    pivot, swing = (a, b) if near_a else (b, a)            # `swing` is the other end of the struck side
+    if _inside_strict(pivot, mover_end_quad):             # a point that is inside the mover can never turn clear of it
+        return None, 'the pivot corner is inside the mover'
+
+    d = info.get('travel')                                # the way the mover was travelling at the impact
+    if not d:
+        mh = math.radians(mover_heading)
+        d = (math.sin(mh), -math.cos(mh))
+
+    def swing_end_advance(deg):                           # how far a turn of `deg` carries the swinging end along d
+        fx, fy = _rotate_about(swing[0], swing[1], pivot[0], pivot[1], deg)
+        return (fx - swing[0]) * d[0] + (fy - swing[1]) * d[1]
+    sign = 1.0 if swing_end_advance(5.0) >= swing_end_advance(-5.0) else -1.0
+
+    x0, y0, h0 = shape['pose']
+    cx0, cy0 = x0 * GRID + HALF_W, y0 * GRID + HALF_H
+
+    def pose_after(deg):                                  # position from the exact turn, heading in whole degrees
+        cx, cy = _rotate_about(cx0, cy0, pivot[0], pivot[1], sign * deg)
+        return cx, cy, round(h0 + sign * deg)
+    quad_after = lambda deg: footprint_from_center(*pose_after(deg))
+    clear = lambda deg: not polygons_overlap(mover_end_quad, quad_after(deg))
+
+    if clear(0.0):
+        return None, 'not overlapping the mover final pose'
+    prev, hi_deg = 0.0, None
+    for k in range(1, int(MAX_PIVOT_DEG) + 1):
+        if clear(float(k)):
+            hi_deg = float(k)
+            break
+        prev = float(k)
+    if hi_deg is None:
+        return None, f'cannot pivot clear within {MAX_PIVOT_DEG} degrees'
+    lo_deg = prev
+    for _ in range(24):
+        mid = (lo_deg + hi_deg) / 2
+        if clear(mid):
+            hi_deg = mid
+        else:
+            lo_deg = mid
+
+    new_quad = quad_after(hi_deg)
+    others = {'shapes': [o for o in obstacles['shapes'] if o['index'] != shape['index']], 'bounds': obstacles['bounds']}
+    blocked_by = collisions_with(new_quad, others)
+    if blocked_by:
+        bl = blocked_by[0]
+        return None, f"blocked by {bl['type']}" + (f" of {bl['owner']}" if 'owner' in bl else '')
+
+    cx, cy, new_h = pose_after(hi_deg)
+    end = {'x': (cx - HALF_W) / GRID, 'y': (cy - HALF_H) / GRID, 'orientation': new_h % 360}
+    return {'owner': shape['owner'], 'index': shape['index'], 'direction': 'pivot',
+            'distance_px': round(math.hypot(cx - cx0, cy - cy0), 4), 'dx_px': cx - cx0, 'dy_px': cy - cy0,
+            'angle': None if angle is None else round(angle, 1), 'head_on': True, 'mover_heading': mover_heading,
+            'pivot': pivot, 'pivot_end': which_end, 'rotation': int(round(sign * hi_deg)),
+            'start': {'x': x0, 'y': y0, 'orientation': h0 % 360}, 'end': end, 'quad': new_quad}, None
+
+
 def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
     """Moves the struck car (V2) the least distance that leaves it clear of the mover's final pose.
-    A head-on hit pushes V2 the way the mover was travelling; a sideswipe nudges it straight away from
-    the surface that was grazed. V2 keeps its heading (pivoting, as in the rulebook's Figure 10, is not
-    applied yet). Returns (push dict, None) or (None, reason it cannot be pushed)."""
+    A T-bone pivots V2 about the end of the struck side that is farther from the impact (see _pivot_car); if that cannot
+    be done it tries the nearer end, and failing that pushes V2 straight back. Any other hit keeps V2's
+    heading: a head-on or rear-end pushes it the way the mover was travelling, and a sideswipe nudges it
+    straight away from the surface that was grazed.
+    Returns (push dict, None) or (None, reason it cannot be pushed)."""
     info = _first_contact_info(pose, {'shapes': [shape], 'bounds': None})
     angle = info['angle'] if info else None
     head_on = angle is None or angle >= head_on_min_deg
+    mover_heading = (pose(info['hi'], False)[2] if info else pose(1.0, False)[2]) % 360
+    pivot_failed = []
+    if (info and info['edge'] and info['point']
+            and classify_car_impact(angle, mover_heading, shape['pose'][2], head_on_min_deg) == 't-bone'):
+        for which in ('far', 'near'):                     # pivot on the end away from the impact; failing that, the other end
+            result, reason = _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_heading, which)
+            if result is not None:
+                if pivot_failed:
+                    result['pivot_failed'] = pivot_failed
+                return result, None
+            pivot_failed.append(f'{which} end: {reason}')
+        # neither end can pivot: the car is still moved out of the way, straight back, below
 
     car_quad = shape['data']
     ccx, ccy = _centroid(car_quad)
@@ -606,14 +692,13 @@ def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
         b = blocked_by[0]
         return None, f"blocked by {b['type']}" + (f" of {b['owner']}" if 'owner' in b else '')
 
-    mover_heading = (pose(info['hi'], False)[2] if info else pose(1.0, False)[2]) % 360
     x0, y0, h0 = shape['pose']
     end = {'x': x0 + direction[0] * s / GRID, 'y': y0 + direction[1] * s / GRID, 'orientation': h0 % 360}
     return {'owner': shape['owner'], 'index': shape['index'], 'direction': kind,
             'distance_px': round(s, 4), 'dx_px': direction[0] * s, 'dy_px': direction[1] * s,
             'angle': None if angle is None else round(angle, 1), 'head_on': head_on, 'mover_heading': mover_heading,
             'start': {'x': x0, 'y': y0, 'orientation': h0 % 360}, 'end': end,
-            'quad': moved(s)}, None
+            'quad': moved(s), 'pivot_failed': pivot_failed}, None
 
 
 def resolve_move(records, x_qty, y_qty, orientation, maneuver,
@@ -706,6 +791,9 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
     out.update(collided=True, conforming='other', pushed=pushed, head_on=first['head_on'], angle=first['angle'],
                hits=[{'type': 'Car', 'index': p['index'], 'owner': p['owner']} for p in pushed] + out['hits'])
     out['note'] = (out['note'] + ' | ' if out['note'] else '') + 'pushed ' + ', '.join(p['owner'] for p in pushed)
+    for p in pushed:
+        if p.get('pivot_failed'):
+            out['note'] += f" | {p['owner']} could not pivot ({'; '.join(p['pivot_failed'])})"
     return out
 
 

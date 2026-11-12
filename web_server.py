@@ -1818,6 +1818,8 @@ def handle_game_confirm_move():
                 other = file_data[p['index']]
                 other['local_starting_x_qty'] = float(p['end']['x'])
                 other['local_starting_y_qty'] = float(p['end']['y'])
+                other['orientation'] = int(round(p['end']['orientation'])) % 360     # a T-bone pivots the struck car
+                other['heading'] = other['orientation']
 
             # speed changes from the impact(s): sideswipe none; t-bone halves the mover; rear-end averages
             # both cars; head-on takes the average off both (the slower car can go negative)
@@ -1828,6 +1830,11 @@ def handle_game_confirm_move():
                     r['current_speed'] = new_speeds[r['owner']]
             for c in speed_changes:
                 print(f"[SPEED] {c['owner']}: {c['before']} -> {c['after']} mph ({c['type']} with {c['with']})")
+
+            # the copy of each car's speed inside the movement queue (the "your turn" dialog shows it) follows too
+            for qp in queue_entry['players']:
+                if qp['username'] in new_speeds:
+                    qp['speed'] = new_speeds[qp['username']]
 
             collided = res['collided']
             if collided:
@@ -1841,6 +1848,7 @@ def handle_game_confirm_move():
                     'sideswipe': res['sideswipe'], 'rotation': res['rotation'],
                     'conforming': res['conforming'], 'pushed': [p['owner'] for p in res['pushed']],
                     'impacts': [{k: i[k] for k in ('owner', 'type', 'conformed', 'angle')} for i in res['impacts']],
+                    'pivoted': {p['owner']: p['rotation'] for p in res['pushed'] if p.get('direction') == 'pivot'},
                     'speed_changes': speed_changes,
                     'stop_fraction': res['stop_fraction'], 'hits': res['hits'],
                     'note': res['note'], 'resolved': False})
