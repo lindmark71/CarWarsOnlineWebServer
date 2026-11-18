@@ -407,7 +407,7 @@ def _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver,
     full_end = as_xy(pose(1.0))
     out = {'collided': False, 'conformed': False, 'head_on': None, 'angle': None, 'stop_fraction': 1.0,
            'end': full_end, 'full_end': full_end, 'hits': [], 'note': '', 'sideswipe': False, 'rotation': 0,
-           'pushed': [], 'conforming': None, 'impact_heading': None, 'impacts': []}
+           'pushed': [], 'conforming': None, 'impact_heading': None, 'impacts': [], 'contact_edge': None}
 
     start_hits = collisions_with(quad(0.0), obstacles)
     if start_hits:                                        # already overlapping: nothing sensible to conform to
@@ -437,16 +437,25 @@ def _resolve_against(obstacles, x_qty, y_qty, orientation, maneuver,
     edges, points = _contact(quad(hi), _obstacle_segments(obstacles, hi_hits))
     angle = None
     pt = None
+    best_edge = None
     if edges and points:
         pt = (sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points))
         d = _travel_direction(pose, hi, pt)
         if d:
-            angles = [a for a in (_angle_to_wall(d, *e) for e in edges) if a is not None]
-            angle = max(angles) if angles else None       # the most square-on surface decides
+            scored = [(a, e) for e in edges for a in [_angle_to_wall(d, *e)] if a is not None]
+            if scored:
+                angle, best_edge = max(scored, key=lambda sc: sc[0])     # the most square-on surface decides
 
     head_on = True if angle is None else angle >= head_on_min_deg
+    if head_on and best_edge is not None:                 # two cars passing side by side are in a sideswipe, however the bend sweeps in
+        for h in hi_hits:
+            shape = next((o for o in obstacles['shapes'] if o['index'] == h.get('index')), None) if h['type'] == 'Car' else None
+            if shape and _edge_on_quad(best_edge, shape['data']) and classify_car_impact(
+                    angle, pose(hi, False)[2] % 360, shape['pose'][2], head_on_min_deg, _struck_side(best_edge)) == 'sideswipe':
+                head_on = False
+                break
     out.update(collided=True, head_on=head_on, angle=None if angle is None else round(angle, 1),
-               hits=hi_hits, stop_fraction=round(lo, 6), impact_heading=pose(hi, False)[2] % 360)
+               hits=hi_hits, stop_fraction=round(lo, 6), impact_heading=pose(hi, False)[2] % 360, contact_edge=best_edge)
     if angle is None:
         out['note'] = 'no_contact_edge'
     if head_on:
@@ -553,10 +562,22 @@ def _first_contact_info(pose, obstacles, samples=24, iterations=16):
 MAX_PIVOT_DEG = 120              # a struck car never pivots further than this
 
 
-def _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_heading, which_end='far'):
-    """T-bone conforming (rulebook Figure 10). The struck car (V2) pivots about the end of the struck side
-    that is FARTHER from the point of impact (the corner stays put), and the end that was hit swings away the
-    way the mover is travelling, by the smallest turn that leaves V2 clear of the mover's final pose.
+def _away_from_surface(edge, point, centre):
+    """Unit normal of a struck edge, pointing into the struck car (away from whatever grazed it)."""
+    (ax, ay), (bx, by) = edge
+    nx, ny = ay - by, bx - ax
+    ln = math.hypot(nx, ny) or 1.0
+    nx, ny = nx / ln, ny / ln
+    if nx * (centre[0] - point[0]) + ny * (centre[1] - point[1]) < 0:
+        nx, ny = -nx, -ny
+    return (nx, ny)
+
+
+def _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_heading, which_end='far', swing_dir=None):
+    """T-bone and sideswipe conforming (rulebook Figure 10). The struck car (V2) pivots about the end of the struck
+    side that is FARTHER from the point of impact (the corner stays put), and the end that was hit swings away -
+    along the mover's travel for a T-bone, straight away from the grazed surface for a sideswipe (swing_dir) -
+    by the smallest turn that leaves V2 clear of the mover's final pose.
     which_end='far' (the default) is that end; 'near' is the other end of the same side, used as a second
     choice. The mover has already completed its whole move.
     Returns (push dict, None) or (None, reason it cannot pivot)."""
@@ -569,7 +590,9 @@ def _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_headin
     if _inside_strict(pivot, mover_end_quad):             # a point that is inside the mover can never turn clear of it
         return None, 'the pivot corner is inside the mover'
 
-    d = info.get('travel')                                # the way the mover was travelling at the impact
+    d = swing_dir                                         # the way the end that was hit should swing
+    if not d:
+        d = info.get('travel')                            # default: along the mover's travel at the impact
     if not d:
         mh = math.radians(mover_heading)
         d = (math.sin(mh), -math.cos(mh))
@@ -624,7 +647,7 @@ def _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_headin
 
 def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
     """Moves the struck car (V2) the least distance that leaves it clear of the mover's final pose.
-    A T-bone pivots V2 about the end of the struck side that is farther from the impact (see _pivot_car); if that cannot
+    A T-bone or a sideswipe pivots V2 about the end of the struck side that is farther from the impact (see _pivot_car); if that cannot
     be done it tries the nearer end, and failing that pushes V2 straight back. Any other hit keeps V2's
     heading: a head-on or rear-end pushes it the way the mover was travelling, and a sideswipe nudges it
     straight away from the surface that was grazed.
@@ -634,20 +657,25 @@ def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
     head_on = angle is None or angle >= head_on_min_deg
     mover_heading = (pose(info['hi'], False)[2] if info else pose(1.0, False)[2]) % 360
     pivot_failed = []
-    if (info and info['edge'] and info['point']
-            and classify_car_impact(angle, mover_heading, shape['pose'][2], head_on_min_deg) == 't-bone'):
+    struck_side = _struck_side(info['edge']) if info and info['edge'] else None
+    impact_type = classify_car_impact(angle, mover_heading, shape['pose'][2], head_on_min_deg, struck_side)
+    if impact_type in ('t-bone', 'sideswipe') and info and info['edge'] and info['point']:
+        # the end that was hit swings: along the mover's travel for a T-bone, straight away from the grazed surface for a sideswipe
+        swing_dir = None if impact_type == 't-bone' else _away_from_surface(info['edge'], info['point'], _centroid(shape['data']))
         for which in ('far', 'near'):                     # pivot on the end away from the impact; failing that, the other end
-            result, reason = _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_heading, which)
+            result, reason = _pivot_car(pose, mover_end_quad, shape, obstacles, info, angle, mover_heading, which, swing_dir)
             if result is not None:
+                result['struck_side'] = struck_side
+                result['head_on'] = impact_type != 'sideswipe'
                 if pivot_failed:
                     result['pivot_failed'] = pivot_failed
                 return result, None
             pivot_failed.append(f'{which} end: {reason}')
-        # neither end can pivot: the car is still moved out of the way, straight back, below
+        # neither end can pivot: the car is still moved out of the way (straight back, or straight off the grazed surface), below
 
     car_quad = shape['data']
     ccx, ccy = _centroid(car_quad)
-    if head_on or not info or not info['edge']:
+    if impact_type != 'sideswipe' or not info or not info['edge']:
         d = (info or {}).get('travel')
         if not d:                                           # fall back to the mover's final heading
             qx = mover_end_quad
@@ -696,9 +724,9 @@ def _push_car(pose, mover_end_quad, shape, obstacles, head_on_min_deg):
     end = {'x': x0 + direction[0] * s / GRID, 'y': y0 + direction[1] * s / GRID, 'orientation': h0 % 360}
     return {'owner': shape['owner'], 'index': shape['index'], 'direction': kind,
             'distance_px': round(s, 4), 'dx_px': direction[0] * s, 'dy_px': direction[1] * s,
-            'angle': None if angle is None else round(angle, 1), 'head_on': head_on, 'mover_heading': mover_heading,
+            'angle': None if angle is None else round(angle, 1), 'head_on': impact_type != 'sideswipe', 'mover_heading': mover_heading,
             'start': {'x': x0, 'y': y0, 'orientation': h0 % 360}, 'end': end,
-            'quad': moved(s), 'pivot_failed': pivot_failed}, None
+            'quad': moved(s), 'pivot_failed': pivot_failed, 'struck_side': struck_side}, None
 
 
 def resolve_move(records, x_qty, y_qty, orientation, maneuver,
@@ -733,10 +761,11 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
             for h in out['hits']:
                 if h['type'] == 'Car' and h['index'] in by_index and out['impact_heading'] is not None:
                     struck_heading = by_index[h['index']]['pose'][2] % 360
+                    side = _struck_side(out['contact_edge']) if out.get('contact_edge') else None
                     out['impacts'].append({
                         'owner': h['owner'], 'index': h['index'], 'conformed': 'mover', 'angle': out['angle'],
-                        'mover_heading': out['impact_heading'], 'struck_heading': struck_heading,
-                        'type': classify_car_impact(out['angle'], out['impact_heading'], struck_heading)})
+                        'mover_heading': out['impact_heading'], 'struck_heading': struck_heading, 'struck_side': side,
+                        'type': classify_car_impact(out['angle'], out['impact_heading'], struck_heading, struck_side=side)})
         if note:
             out['note'] = f"{out['note']} | {note}" if out['note'] else note
         return out
@@ -787,7 +816,8 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
         out['impacts'].append({
             'owner': p['owner'], 'index': p['index'], 'conformed': 'other', 'angle': p['angle'],
             'mover_heading': p['mover_heading'], 'struck_heading': p['start']['orientation'],
-            'type': classify_car_impact(p['angle'], p['mover_heading'], p['start']['orientation'])})
+            'struck_side': p.get('struck_side'),
+            'type': classify_car_impact(p['angle'], p['mover_heading'], p['start']['orientation'], struck_side=p.get('struck_side'))})
     out.update(collided=True, conforming='other', pushed=pushed, head_on=first['head_on'], angle=first['angle'],
                hits=[{'type': 'Car', 'index': p['index'], 'owner': p['owner']} for p in pushed] + out['hits'])
     out['note'] = (out['note'] + ' | ' if out['note'] else '') + 'pushed ' + ', '.join(p['owner'] for p in pushed)
@@ -800,7 +830,8 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
 # ═══════════════════════════════ Collision types and speed changes ═══════════════════════════════
 #
 # Four types of car-versus-car collision, from the approach angle and the two cars' headings:
-#   sideswipe  the mover meets the other car at under 45 degrees to its surface   -> no speed change
+#   sideswipe  under 45 degrees to the other car's surface, or side against side while the cars point
+#              the same way or opposite ways (two cars passing alongside each other)   -> no speed change
 #   head-on    the cars face each other (headings 135-180 degrees apart)          -> each loses the AVERAGE speed
 #   rear-end   the cars point the same way (headings 0-45 degrees apart)          -> both end at the AVERAGE speed
 #   t-bone     anything in between                                                -> the MOVER's speed is halved
@@ -809,12 +840,25 @@ def resolve_move(records, x_qty, y_qty, orientation, maneuver,
 SPEED_STEP = 5               # speeds change in whole steps of 5 mph
 SPEED_ROUNDING = 'nearest'   # 'nearest' (an exact tie goes DOWN, toward zero), 'down' or 'up'; applied to the size of the speed
 
-def classify_car_impact(angle, mover_heading, struck_heading, sideswipe_below_deg=45.0):
+def _edge_on_quad(edge, quad, tol=1e-6):
+    """True when both ends of `edge` are corners of `quad` (the edge belongs to that car)."""
+    return all(any(math.hypot(p[0] - q[0], p[1] - q[1]) <= tol for q in quad) for p in edge)
+
+def _struck_side(edge):
+    """'side' if the struck edge is one of the car's long sides, 'end' if it is the front or the rear."""
+    (ax, ay), (bx, by) = edge
+    return 'side' if math.hypot(bx - ax, by - ay) > 30.0 else 'end'
+
+def classify_car_impact(angle, mover_heading, struck_heading, sideswipe_below_deg=45.0, struck_side=None):
     """'sideswipe', 'head-on', 'rear-end' or 't-bone'.  angle: the mover's angle to the struck surface
-    (90 = square on); None (cars lined up exactly, no measurable edge) counts as square on."""
+    (90 = square on); None (cars lined up exactly, no measurable edge) counts as square on.
+    struck_side: 'side' or 'end' of the struck car, when known. Side against side while the cars point the
+    same way or opposite ways is a sideswipe (two cars passing alongside each other), not a head-on."""
     if angle is not None and angle < sideswipe_below_deg:
         return 'sideswipe'
     rel = abs(((float(struck_heading) - float(mover_heading) + 180.0) % 360.0) - 180.0)   # 0 = same way, 180 = opposite
+    if struck_side == 'side' and (rel >= 135.0 or rel <= 45.0):
+        return 'sideswipe'
     if rel >= 135.0:
         return 'head-on'
     if rel <= 45.0:
